@@ -1,6 +1,7 @@
 import sys
 import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QCloseEvent
@@ -24,6 +25,7 @@ from add_subtitles_to_videos.services.subtitles import (
     write_srt,
 )
 from add_subtitles_to_videos.services.whisper import WhisperService
+from add_subtitles_to_videos.services import ffmpeg as ffmpeg_module
 from add_subtitles_to_videos.ui import main_window as main_window_module
 
 
@@ -232,10 +234,6 @@ def test_app_replaces_missing_console_streams(monkeypatch) -> None:
         for stream in app_module._NULL_STREAMS:
             stream.close()
         app_module._NULL_STREAMS[:] = created_streams
-
-
-from unittest.mock import MagicMock, patch
-from add_subtitles_to_videos.services import ffmpeg as ffmpeg_module
 
 
 def test_pipeline_transcribe_returns_transcription_result(tmp_path) -> None:

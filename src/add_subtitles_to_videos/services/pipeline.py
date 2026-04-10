@@ -165,10 +165,9 @@ class SubtitlePipeline:
         )
 
         self._emit(progress, 0.76, "Writing subtitle file")
-        subtitle_file.parent.mkdir(parents=True, exist_ok=True)
         subtitle_file.write_text(srt_text, encoding="utf-8")
         segment_count, preview_text = self._parse_srt_summary(srt_text)
-        self._emit_log(log, f"Wrote subtitle file to {subtitle_file.name}")
+        self._emit_log(log, f"Wrote {segment_count} subtitle segments to {subtitle_file.name}")
 
         if burned_video is not None:
             self._emit(progress, 0.86, "Burning subtitles into video")
