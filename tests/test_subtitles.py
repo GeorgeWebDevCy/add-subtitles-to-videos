@@ -19,6 +19,7 @@ from add_subtitles_to_videos.models import (
 from add_subtitles_to_videos.services.pipeline import SubtitlePipeline
 from add_subtitles_to_videos.services.subtitles import (
     format_srt_timestamp,
+    segments_to_srt_text,
     wrap_subtitle_text,
     write_srt,
 )
@@ -116,6 +117,22 @@ def test_write_srt_creates_numbered_blocks(tmp_path) -> None:
 
     assert segment_count == 2
     assert output_path.read_text(encoding="utf-8").startswith("1\n00:00:00,000 --> 00:00:01,500")
+
+
+def test_segments_to_srt_text_produces_valid_srt() -> None:
+    srt = segments_to_srt_text(
+        [
+            SubtitleSegment(0.0, 1.5, "Alpha"),
+            SubtitleSegment(2.0, 3.5, "Beta"),
+        ],
+        max_line_length=40,
+    )
+    assert srt.startswith("1\n00:00:00,000 --> 00:00:01,500\nAlpha")
+    assert "2\n00:00:02,000 --> 00:00:03,500\nBeta" in srt
+
+
+def test_segments_to_srt_text_empty_segments_returns_empty_string() -> None:
+    assert segments_to_srt_text([], max_line_length=40) == ""
 
 
 def test_pipeline_flags_language_mismatch_and_non_english_translation() -> None:
