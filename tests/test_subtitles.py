@@ -61,35 +61,32 @@ def _pump_events_until(predicate, timeout_seconds: float = 2.0) -> bool:
     return predicate()
 
 
-class DelayedCompletionThread(QThread):
+class DelayedTranscriptionThread(QThread):
+    """Fake TranscriptionThread that emits a TranscriptionResult then sleeps 200 ms."""
+
     progress_changed = Signal(int, str)
-    job_started = Signal(int, int, str)
     log_message = Signal(str)
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, files, options) -> None:
+    def __init__(self, video_path, options, file_index, total_files) -> None:
         super().__init__()
-        self._files = files
+        self._video_path = video_path
 
     def run(self) -> None:
-        file_name = self._files[0].name
-        self.job_started.emit(1, 1, file_name)
-        self.completed.emit(
-            [
-                PipelineResult(
-                    input_video=self._files[0],
-                    subtitle_file=self._files[0].with_suffix(".en.srt"),
-                    burned_video=None,
-                    detected_language="el",
-                    device_label="CUDA GPU",
-                    segment_count=4,
-                    elapsed_seconds=0.2,
-                    preview_text="1. preview",
-                    warning_messages=(),
-                )
-            ]
+        result = TranscriptionResult(
+            input_video=self._video_path,
+            segments=[],
+            metadata=TranscriptionMetadata(
+                detected_language="el",
+                detected_language_probability=None,
+                device_label="CPU",
+                task_label="transcribe",
+            ),
+            warning_messages=(),
+            srt_text="",
         )
+        self.completed.emit(result)
         self.msleep(200)
 
 
@@ -305,9 +302,11 @@ def test_pipeline_finalize_writes_srt_and_returns_result(tmp_path) -> None:
     assert "Hello" in result.preview_text
 
 
-def test_main_window_keeps_worker_alive_until_finished(monkeypatch, tmp_path) -> None:
+def test_main_window_keeps_transcription_thread_alive_until_finished(
+    monkeypatch, tmp_path
+) -> None:
     _application()
-    monkeypatch.setattr(main_window_module, "BatchProcessingThread", DelayedCompletionThread)
+    monkeypatch.setattr(main_window_module, "TranscriptionThread", DelayedTranscriptionThread)
 
     window = main_window_module.MainWindow()
     video_path = tmp_path / "demo.mp4"
@@ -315,21 +314,23 @@ def test_main_window_keeps_worker_alive_until_finished(monkeypatch, tmp_path) ->
     window.output_directory_edit.setText(str(tmp_path))
 
     window._start_processing()
-    worker = window._worker
+    thread = window._transcription_thread
 
-    assert worker is not None
-    assert _pump_events_until(lambda: window.status_label.text() == "All subtitle jobs finished.")
-    assert worker.isRunning()
-    assert window._worker is worker
-    assert _pump_events_until(lambda: window._worker is None)
+    assert thread is not None
+    # After completed fires, review panel is shown; thread is still in msleep
+    assert _pump_events_until(lambda: window._content_stack.currentIndex() == 1)
+    assert thread.isRunning()
+    assert window._transcription_thread is thread
+    # After finished fires, the reference is cleared
+    assert _pump_events_until(lambda: window._transcription_thread is None)
 
     window.close()
 
 
-def test_main_window_ignores_close_while_worker_is_running(monkeypatch, tmp_path) -> None:
+def test_main_window_ignores_close_while_transcribing(monkeypatch, tmp_path) -> None:
     _application()
-    monkeypatch.setattr(main_window_module, "BatchProcessingThread", DelayedCompletionThread)
-    monkeypatch.setattr(main_window_module.QMessageBox, "information", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_window_module, "TranscriptionThread", DelayedTranscriptionThread)
+    monkeypatch.setattr(main_window_module.QMessageBox, "information", lambda *a, **kw: None)
 
     window = main_window_module.MainWindow()
     video_path = tmp_path / "demo.mp4"
@@ -337,12 +338,12 @@ def test_main_window_ignores_close_while_worker_is_running(monkeypatch, tmp_path
     window.output_directory_edit.setText(str(tmp_path))
 
     window._start_processing()
-    assert window._worker is not None
-    assert window._worker.isRunning()
+    assert window._transcription_thread is not None
+    assert window._transcription_thread.isRunning()
 
     event = QCloseEvent()
     window.closeEvent(event)
     assert not event.isAccepted()
 
-    assert _pump_events_until(lambda: window._worker is None)
+    assert _pump_events_until(lambda: window._transcription_thread is None)
     window.close()
