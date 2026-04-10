@@ -83,6 +83,11 @@ def application_stylesheet() -> str:
         line-height: 1.35;
     }
 
+    QLabel#warningText {
+        color: #e05c5c;
+        font-size: 12px;
+    }
+
     QListWidget,
     QPlainTextEdit,
     QLineEdit,

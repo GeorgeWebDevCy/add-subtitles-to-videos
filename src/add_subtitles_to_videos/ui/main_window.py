@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -172,7 +173,11 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._create_left_column())
         splitter.addWidget(self._create_right_column())
         splitter.setSizes([640, 520])
-        root_layout.addWidget(splitter, stretch=1)
+
+        self._content_stack = QStackedWidget()
+        self._content_stack.addWidget(splitter)                      # index 0 — normal view
+        self._content_stack.addWidget(self._create_review_panel())   # index 1 — review mode
+        root_layout.addWidget(self._content_stack, stretch=1)
 
         self.setCentralWidget(root)
 
@@ -431,6 +436,56 @@ class MainWindow(QMainWindow):
         self.preview_output.setMinimumHeight(150)
         layout.addWidget(self.preview_output)
         layout.addStretch(1)
+        return card
+
+    def _create_review_panel(self) -> QWidget:
+        card = self._card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(14)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(16)
+        header_row.addWidget(self._section_title("Review Transcript"))
+
+        self.review_file_label = QLabel()
+        self.review_file_label.setObjectName("statusValue")
+        self.review_file_label.setWordWrap(False)
+        header_row.addWidget(self.review_file_label, stretch=1)
+
+        self.review_queue_label = QLabel()
+        self.review_queue_label.setObjectName("supportingText")
+        header_row.addWidget(self.review_queue_label)
+
+        layout.addLayout(header_row)
+
+        self.srt_editor = QPlainTextEdit()
+        self.srt_editor.setPlaceholderText(
+            "The Whisper SRT transcript will appear here. Edit any mistakes before continuing."
+        )
+        layout.addWidget(self.srt_editor, stretch=1)
+
+        self.review_warning_label = QLabel("SRT content cannot be empty.")
+        self.review_warning_label.setObjectName("warningText")
+        self.review_warning_label.setVisible(False)
+        layout.addWidget(self.review_warning_label)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(10)
+        button_row.addStretch(1)
+
+        self.use_original_button = QPushButton("Use Original")
+        self.use_original_button.setObjectName("secondaryButton")
+        self.use_original_button.clicked.connect(self._on_use_original_clicked)
+
+        self.approve_button = QPushButton("Approve & Continue")
+        self.approve_button.setObjectName("runButton")
+        self.approve_button.clicked.connect(self._on_approve_clicked)
+
+        button_row.addWidget(self.use_original_button)
+        button_row.addWidget(self.approve_button)
+        layout.addLayout(button_row)
+
         return card
 
     def _choose_videos(self) -> None:
