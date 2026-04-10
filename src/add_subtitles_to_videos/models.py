@@ -43,6 +43,15 @@ class TranscriptionMetadata:
 
 
 @dataclass(slots=True)
+class TranscriptionResult:
+    input_video: Path
+    segments: list[SubtitleSegment]
+    metadata: TranscriptionMetadata
+    warning_messages: tuple[str, ...]
+    srt_text: str
+
+
+@dataclass(slots=True)
 class PipelineResult:
     input_video: Path
     subtitle_file: Path

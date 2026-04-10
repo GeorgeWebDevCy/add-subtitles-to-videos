@@ -1,4 +1,27 @@
 import time
+from pathlib import Path
+
+from add_subtitles_to_videos.models import (
+    OutputMode,
+    ProcessingOptions,
+    SubtitleMode,
+    PipelineResult,
+    SubtitleSegment,
+    TranscriptionMetadata,
+    TranscriptionResult,
+)
+
+
+def test_transcription_result_stores_srt_text() -> None:
+    result = TranscriptionResult(
+        input_video=Path("video.mp4"),
+        segments=[SubtitleSegment(0.0, 1.0, "Hello")],
+        metadata=TranscriptionMetadata(detected_language="en", detected_language_probability=None),
+        warning_messages=(),
+        srt_text="1\n00:00:00,000 --> 00:00:01,000\nHello\n",
+    )
+    assert result.srt_text.startswith("1\n")
+    assert "Hello" in result.srt_text
 import sys
 from pathlib import Path
 
