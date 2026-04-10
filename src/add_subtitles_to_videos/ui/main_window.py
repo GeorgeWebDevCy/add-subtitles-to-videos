@@ -45,55 +45,6 @@ from ..models import PipelineResult, ProcessingOptions, TranscriptionResult
 from ..services.pipeline import SubtitlePipeline
 
 
-class BatchProcessingThread(QThread):
-    progress_changed = Signal(int, str)
-    job_started = Signal(int, int, str)
-    log_message = Signal(str)
-    completed = Signal(object)
-    failed = Signal(str)
-
-    def __init__(self, files: list[Path], options: ProcessingOptions) -> None:
-        super().__init__()
-        self._files = files
-        self._options = options
-
-    def run(self) -> None:
-        try:
-            pipeline = SubtitlePipeline()
-            results: list[PipelineResult] = []
-            total_files = len(self._files)
-
-            for file_index, video_path in enumerate(self._files):
-                self.job_started.emit(file_index + 1, total_files, video_path.name)
-                self.log_message.emit(
-                    f"[{file_index + 1}/{total_files}] Starting {video_path.name}"
-                )
-
-                def on_progress(
-                    stage_progress: float,
-                    message: str,
-                    *,
-                    current_index: int = file_index,
-                    current_path: Path = video_path,
-                ) -> None:
-                    overall_progress = int(((current_index + stage_progress) / total_files) * 100)
-                    self.progress_changed.emit(overall_progress, f"{current_path.name}: {message}")
-
-                def on_log(message: str, *, current_path: Path = video_path) -> None:
-                    self.log_message.emit(f"{current_path.name}: {message}")
-
-                result = pipeline.process_video(
-                    video_path,
-                    self._options,
-                    progress=on_progress,
-                    log=on_log,
-                )
-                results.append(result)
-
-            self.completed.emit(results)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
 
 class TranscriptionThread(QThread):
     progress_changed = Signal(int, str)
@@ -185,10 +136,13 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self._selected_files: list[Path] = []
-        self._worker: BatchProcessingThread | None = None
+        self._current_options: ProcessingOptions | None = None
+        self._current_file_index: int = 0
+        self._all_results: list[PipelineResult] = []
+        self._current_transcription: TranscriptionResult | None = None
+        self._transcription_thread: TranscriptionThread | None = None
+        self._finalize_thread: FinalizeThread | None = None
         self._job_started_at: datetime | None = None
-        self._current_file_name = "Waiting for a job"
-        self._queue_position_text = "No files running"
         self._exit_fullscreen_shortcut: QShortcut | None = None
         self._toggle_fullscreen_shortcut: QShortcut | None = None
 
@@ -522,7 +476,9 @@ class MainWindow(QMainWindow):
             self.output_directory_edit.setText(chosen_directory)
 
     def _start_processing(self) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        transcribing = self._transcription_thread is not None and self._transcription_thread.isRunning()
+        finalizing = self._finalize_thread is not None and self._finalize_thread.isRunning()
+        if transcribing or finalizing:
             return
 
         if not self._selected_files:
@@ -534,7 +490,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_NAME, "Choose an output directory first.")
             return
 
-        options = ProcessingOptions(
+        self._current_options = ProcessingOptions(
             source_language=self.source_language_combo.currentData(),
             subtitle_mode=self.subtitle_mode_combo.currentData(),
             whisper_model=self.whisper_model_combo.currentData(),
@@ -543,6 +499,8 @@ class MainWindow(QMainWindow):
             max_line_length=self.max_line_length_spinbox.value(),
             subtitle_font_size=self.subtitle_font_size_spinbox.value(),
         )
+        self._current_file_index = 0
+        self._all_results = []
 
         self.progress_bar.setValue(0)
         self.status_label.setText("Starting subtitle pipeline...")
@@ -556,38 +514,107 @@ class MainWindow(QMainWindow):
         self._update_elapsed_label()
         self._set_busy(True)
 
-        worker = BatchProcessingThread(self._selected_files.copy(), options)
-        worker.job_started.connect(self._on_job_started)
-        worker.progress_changed.connect(self._on_progress)
-        worker.log_message.connect(self._append_log)
-        worker.completed.connect(self._on_completed)
-        worker.failed.connect(self._on_failed)
-        worker.finished.connect(lambda current_worker=worker: self._on_worker_finished(current_worker))
-        self._worker = worker
-        worker.start()
+        self._start_next_file()
 
-    def _on_job_started(self, current_index: int, total_files: int, file_name: str) -> None:
-        self._current_file_name = file_name
-        self._queue_position_text = f"File {current_index} of {total_files}"
-        self.active_file_value.setText(file_name)
-        self.queue_value.setText(self._queue_position_text)
+    def _start_next_file(self) -> None:
+        assert self._current_options is not None
+        video_path = self._selected_files[self._current_file_index]
+        total = len(self._selected_files)
+
+        self.active_file_value.setText(video_path.name)
+        self.queue_value.setText(f"File {self._current_file_index + 1} of {total}")
+        self._append_log(f"[{self._current_file_index + 1}/{total}] Starting {video_path.name}")
+
+        thread = TranscriptionThread(
+            video_path,
+            self._current_options,
+            self._current_file_index,
+            total,
+        )
+        thread.progress_changed.connect(self._on_progress)
+        thread.log_message.connect(self._append_log)
+        thread.completed.connect(self._on_transcription_completed)
+        thread.failed.connect(self._on_failed)
+        thread.finished.connect(lambda t=thread: self._on_thread_finished(t))
+        self._transcription_thread = thread
+        thread.start()
+
+    def _on_transcription_completed(self, result: TranscriptionResult) -> None:
+        self._current_transcription = result
+        total = len(self._selected_files)
+
+        for warning in result.warning_messages:
+            self._append_log(f"{result.input_video.name}: Review flag: {warning}")
+
+        self.review_file_label.setText(result.input_video.name)
+        self.review_queue_label.setText(f"File {self._current_file_index + 1} of {total}")
+        self.srt_editor.setPlainText(result.srt_text)
+        self.review_warning_label.setVisible(False)
+        self.status_label.setText(f"Review transcript for {result.input_video.name}")
+        self._content_stack.setCurrentIndex(1)
+
+    def _on_approve_clicked(self) -> None:
+        srt_text = self.srt_editor.toPlainText().strip()
+        if not srt_text:
+            self.review_warning_label.setVisible(True)
+            return
+        self._start_finalize(srt_text)
+
+    def _on_use_original_clicked(self) -> None:
+        assert self._current_transcription is not None
+        self._start_finalize(self._current_transcription.srt_text)
+
+    def _start_finalize(self, srt_text: str) -> None:
+        assert self._current_options is not None
+        assert self._current_transcription is not None
+
+        self._content_stack.setCurrentIndex(0)
+        self.status_label.setText(
+            f"Writing subtitles for {self._current_transcription.input_video.name}..."
+        )
+
+        total = len(self._selected_files)
+        thread = FinalizeThread(
+            self._current_transcription,
+            srt_text,
+            self._current_options,
+            self._current_file_index,
+            total,
+        )
+        thread.progress_changed.connect(self._on_progress)
+        thread.log_message.connect(self._append_log)
+        thread.completed.connect(self._on_finalize_completed)
+        thread.failed.connect(self._on_failed)
+        thread.finished.connect(lambda t=thread: self._on_thread_finished(t))
+        self._finalize_thread = thread
+        self._current_transcription = None
+        thread.start()
+
+    def _on_finalize_completed(self, result: PipelineResult) -> None:
+        self._all_results.append(result)
+        self._refresh_summary(result)
+        self._current_file_index += 1
+        if self._current_file_index < len(self._selected_files):
+            self._start_next_file()
+        else:
+            self._on_all_done()
+
+    def _on_all_done(self) -> None:
+        self._set_busy(False)
+        self._elapsed_timer.stop()
+        self.status_label.setText("All subtitle jobs finished.")
+        self.progress_bar.setValue(100)
+        self._append_log(f"Finished all {len(self._all_results)} queued videos.")
+        self.queue_value.setText(f"{len(self._all_results)} of {len(self._selected_files)} finished")
 
     def _on_progress(self, value: int, message: str) -> None:
         self.progress_bar.setValue(value)
         self.status_label.setText(message)
 
-    def _on_completed(self, results: list[PipelineResult]) -> None:
-        self._set_busy(False)
-        self._elapsed_timer.stop()
-        self.status_label.setText("All subtitle jobs finished.")
-        self.progress_bar.setValue(100)
-        self._append_log("Finished all queued videos.")
-        self._refresh_summary(results[-1] if results else None)
-        self.queue_value.setText(f"{len(results)} of {len(self._selected_files)} finished")
-
     def _on_failed(self, error_message: str) -> None:
         self._set_busy(False)
         self._elapsed_timer.stop()
+        self._content_stack.setCurrentIndex(0)
         self.status_label.setText("The subtitle pipeline hit an error.")
         self._append_log(error_message)
         self.review_flags_label.setText(
@@ -595,10 +622,12 @@ class MainWindow(QMainWindow):
         )
         QMessageBox.critical(self, APP_NAME, error_message)
 
-    def _on_worker_finished(self, worker: BatchProcessingThread) -> None:
-        if self._worker is worker:
-            self._worker = None
-        worker.deleteLater()
+    def _on_thread_finished(self, thread: QThread) -> None:
+        if self._transcription_thread is thread:
+            self._transcription_thread = None
+        elif self._finalize_thread is thread:
+            self._finalize_thread = None
+        thread.deleteLater()
 
     def _refresh_summary(self, result: PipelineResult | None) -> None:
         if result is None:
@@ -685,8 +714,8 @@ class MainWindow(QMainWindow):
             self.showFullScreen()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        worker = self._worker
-        if worker is not None and worker.isRunning():
+        active = self._transcription_thread or self._finalize_thread
+        if active is not None and active.isRunning():
             QMessageBox.information(
                 self,
                 APP_NAME,
@@ -695,8 +724,9 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
-        if worker is not None:
-            worker.wait(1000)
+        for thread in (self._transcription_thread, self._finalize_thread):
+            if thread is not None:
+                thread.wait(1000)
         super().closeEvent(event)
 
     @staticmethod
