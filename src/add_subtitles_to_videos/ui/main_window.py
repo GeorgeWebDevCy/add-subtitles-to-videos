@@ -602,6 +602,7 @@ class MainWindow(QMainWindow):
     def _on_all_done(self) -> None:
         self._set_busy(False)
         self._elapsed_timer.stop()
+        self._job_started_at = None
         self.status_label.setText("All subtitle jobs finished.")
         self.progress_bar.setValue(100)
         self._append_log(f"Finished all {len(self._all_results)} queued videos.")
@@ -614,6 +615,7 @@ class MainWindow(QMainWindow):
     def _on_failed(self, error_message: str) -> None:
         self._set_busy(False)
         self._elapsed_timer.stop()
+        self._job_started_at = None
         self._content_stack.setCurrentIndex(0)
         self.status_label.setText("The subtitle pipeline hit an error.")
         self._append_log(error_message)
