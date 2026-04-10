@@ -41,56 +41,92 @@ from ..config import (
     VIDEO_FILE_FILTER,
     WHISPER_MODEL_OPTIONS,
 )
-from ..models import PipelineResult, ProcessingOptions
+from ..models import PipelineResult, ProcessingOptions, TranscriptionResult
 from ..services.pipeline import SubtitlePipeline
 
 
-class BatchProcessingThread(QThread):
+class TranscriptionThread(QThread):
     progress_changed = Signal(int, str)
-    job_started = Signal(int, int, str)
     log_message = Signal(str)
-    completed = Signal(object)
+    completed = Signal(object)  # TranscriptionResult
     failed = Signal(str)
 
-    def __init__(self, files: list[Path], options: ProcessingOptions) -> None:
+    def __init__(
+        self,
+        video_path: Path,
+        options: ProcessingOptions,
+        file_index: int,
+        total_files: int,
+    ) -> None:
         super().__init__()
-        self._files = files
+        self._video_path = video_path
         self._options = options
+        self._file_index = file_index
+        self._total_files = total_files
 
     def run(self) -> None:
         try:
             pipeline = SubtitlePipeline()
-            results: list[PipelineResult] = []
-            total_files = len(self._files)
 
-            for file_index, video_path in enumerate(self._files):
-                self.job_started.emit(file_index + 1, total_files, video_path.name)
-                self.log_message.emit(
-                    f"[{file_index + 1}/{total_files}] Starting {video_path.name}"
-                )
+            def on_progress(stage_progress: float, message: str) -> None:
+                overall = int(((self._file_index + stage_progress) / self._total_files) * 100)
+                self.progress_changed.emit(overall, f"{self._video_path.name}: {message}")
 
-                def on_progress(
-                    stage_progress: float,
-                    message: str,
-                    *,
-                    current_index: int = file_index,
-                    current_path: Path = video_path,
-                ) -> None:
-                    overall_progress = int(((current_index + stage_progress) / total_files) * 100)
-                    self.progress_changed.emit(overall_progress, f"{current_path.name}: {message}")
+            def on_log(message: str) -> None:
+                self.log_message.emit(f"{self._video_path.name}: {message}")
 
-                def on_log(message: str, *, current_path: Path = video_path) -> None:
-                    self.log_message.emit(f"{current_path.name}: {message}")
+            result = pipeline.transcribe(
+                self._video_path,
+                self._options,
+                progress=on_progress,
+                log=on_log,
+            )
+            self.completed.emit(result)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
-                result = pipeline.process_video(
-                    video_path,
-                    self._options,
-                    progress=on_progress,
-                    log=on_log,
-                )
-                results.append(result)
 
-            self.completed.emit(results)
+class FinalizeThread(QThread):
+    progress_changed = Signal(int, str)
+    log_message = Signal(str)
+    completed = Signal(object)  # PipelineResult
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        transcription: TranscriptionResult,
+        srt_text: str,
+        options: ProcessingOptions,
+        file_index: int,
+        total_files: int,
+    ) -> None:
+        super().__init__()
+        self._transcription = transcription
+        self._srt_text = srt_text
+        self._options = options
+        self._file_index = file_index
+        self._total_files = total_files
+
+    def run(self) -> None:
+        try:
+            pipeline = SubtitlePipeline()
+            video_name = self._transcription.input_video.name
+
+            def on_progress(stage_progress: float, message: str) -> None:
+                overall = int(((self._file_index + stage_progress) / self._total_files) * 100)
+                self.progress_changed.emit(overall, f"{video_name}: {message}")
+
+            def on_log(message: str) -> None:
+                self.log_message.emit(f"{video_name}: {message}")
+
+            result = pipeline.finalize(
+                self._transcription,
+                self._srt_text,
+                self._options,
+                progress=on_progress,
+                log=on_log,
+            )
+            self.completed.emit(result)
         except Exception as exc:
             self.failed.emit(str(exc))
 
