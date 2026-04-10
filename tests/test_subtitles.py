@@ -234,6 +234,79 @@ def test_app_replaces_missing_console_streams(monkeypatch) -> None:
         app_module._NULL_STREAMS[:] = created_streams
 
 
+from unittest.mock import MagicMock, patch
+from add_subtitles_to_videos.services import ffmpeg as ffmpeg_module
+
+
+def test_pipeline_transcribe_returns_transcription_result(tmp_path) -> None:
+    fake_segments = [SubtitleSegment(0.0, 1.0, "Hello")]
+    fake_metadata = TranscriptionMetadata(
+        detected_language="en",
+        detected_language_probability=None,
+        device_label="CPU",
+        task_label="transcribe",
+    )
+
+    mock_whisper = MagicMock()
+    mock_whisper.transcribe.return_value = (fake_segments, fake_metadata)
+
+    options = ProcessingOptions(
+        source_language="en",
+        subtitle_mode=SubtitleMode.SOURCE,
+        whisper_model="base",
+        output_mode=OutputMode.SRT_ONLY,
+        output_directory=tmp_path,
+        max_line_length=42,
+        subtitle_font_size=18,
+    )
+
+    with patch.object(ffmpeg_module, "extract_audio"), \
+         patch.object(ffmpeg_module, "ffmpeg_binary", return_value="/fake/ffmpeg"):
+        pipeline = SubtitlePipeline(whisper_service=mock_whisper)
+        result = pipeline.transcribe(tmp_path / "video.mp4", options)
+
+    assert isinstance(result, TranscriptionResult)
+    assert result.segments == fake_segments
+    assert result.metadata == fake_metadata
+    assert "Hello" in result.srt_text
+
+
+def test_pipeline_finalize_writes_srt_and_returns_result(tmp_path) -> None:
+    video_path = tmp_path / "video.mp4"
+    srt_text = "1\n00:00:00,000 --> 00:00:01,000\nHello\n"
+    fake_metadata = TranscriptionMetadata(
+        detected_language="en",
+        detected_language_probability=None,
+        device_label="CPU",
+        task_label="transcribe",
+    )
+    transcription = TranscriptionResult(
+        input_video=video_path,
+        segments=[SubtitleSegment(0.0, 1.0, "Hello")],
+        metadata=fake_metadata,
+        warning_messages=(),
+        srt_text=srt_text,
+    )
+    options = ProcessingOptions(
+        source_language="en",
+        subtitle_mode=SubtitleMode.SOURCE,
+        whisper_model="base",
+        output_mode=OutputMode.SRT_ONLY,
+        output_directory=tmp_path,
+        max_line_length=42,
+        subtitle_font_size=18,
+    )
+
+    pipeline = SubtitlePipeline()
+    result = pipeline.finalize(transcription, srt_text, options)
+
+    subtitle_file = tmp_path / "video.native.srt"
+    assert subtitle_file.exists()
+    assert subtitle_file.read_text(encoding="utf-8") == srt_text
+    assert result.segment_count == 1
+    assert "Hello" in result.preview_text
+
+
 def test_main_window_keeps_worker_alive_until_finished(monkeypatch, tmp_path) -> None:
     _application()
     monkeypatch.setattr(main_window_module, "BatchProcessingThread", DelayedCompletionThread)

@@ -5,9 +5,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
-from ..models import OutputMode, PipelineResult, ProcessingOptions, SubtitleMode
+from ..models import OutputMode, PipelineResult, ProcessingOptions, SubtitleMode, TranscriptionResult
 from . import ffmpeg
-from .subtitles import write_srt
+from .subtitles import segments_to_srt_text, write_srt
 from .whisper import WhisperService
 
 ProgressReporter = Callable[[float, str], None]
@@ -96,6 +96,117 @@ class SubtitlePipeline:
             preview_text=self._build_preview_text(segments),
             warning_messages=warning_messages,
         )
+
+    def transcribe(
+        self,
+        video_path: Path,
+        options: ProcessingOptions,
+        *,
+        progress: ProgressReporter | None = None,
+        log: LogReporter | None = None,
+    ) -> TranscriptionResult:
+        input_video = video_path.expanduser().resolve()
+
+        self._emit(progress, 0.03, "Preparing audio")
+        self._emit_log(log, f"Using FFmpeg binary at {ffmpeg.ffmpeg_binary()}")
+
+        with TemporaryDirectory(prefix="subtitle-foundry-audio-") as temp_dir:
+            audio_path = Path(temp_dir) / "audio.wav"
+            self._emit_log(log, f"Extracting mono audio from {input_video.name}")
+            ffmpeg.extract_audio(input_video, audio_path)
+
+            self._emit(progress, 0.22, "Running Whisper")
+            segments, metadata = self._whisper_service.transcribe(
+                audio_path,
+                options,
+                log=log,
+            )
+
+        if not segments:
+            raise RuntimeError(
+                "Whisper returned no subtitle segments. Try a larger model or confirm the source language."
+            )
+
+        warning_messages = self._build_review_flags(segments, options, metadata)
+        for warning in warning_messages:
+            self._emit_log(log, f"Review flag: {warning}")
+
+        srt_text = segments_to_srt_text(segments, max_line_length=options.max_line_length)
+        self._emit(progress, 0.76, "Transcription complete — ready for review")
+
+        return TranscriptionResult(
+            input_video=input_video,
+            segments=segments,
+            metadata=metadata,
+            warning_messages=warning_messages,
+            srt_text=srt_text,
+        )
+
+    def finalize(
+        self,
+        transcription: TranscriptionResult,
+        srt_text: str,
+        options: ProcessingOptions,
+        *,
+        progress: ProgressReporter | None = None,
+        log: LogReporter | None = None,
+    ) -> PipelineResult:
+        started_at = perf_counter()
+        video_path = transcription.input_video
+        output_directory = options.output_directory.expanduser().resolve()
+        output_directory.mkdir(parents=True, exist_ok=True)
+
+        subtitle_suffix = "en" if options.subtitle_mode == SubtitleMode.ENGLISH else "native"
+        subtitle_file = output_directory / f"{video_path.stem}.{subtitle_suffix}.srt"
+        burned_video = (
+            output_directory / f"{video_path.stem}.subtitled{video_path.suffix}"
+            if options.output_mode == OutputMode.BURNED_VIDEO
+            else None
+        )
+
+        self._emit(progress, 0.76, "Writing subtitle file")
+        subtitle_file.parent.mkdir(parents=True, exist_ok=True)
+        subtitle_file.write_text(srt_text, encoding="utf-8")
+        segment_count, preview_text = self._parse_srt_summary(srt_text)
+        self._emit_log(log, f"Wrote subtitle file to {subtitle_file.name}")
+
+        if burned_video is not None:
+            self._emit(progress, 0.86, "Burning subtitles into video")
+            ffmpeg.burn_subtitles(
+                video_path,
+                subtitle_file,
+                burned_video,
+                font_size=options.subtitle_font_size,
+            )
+            self._emit_log(log, f"Wrote subtitled video to {burned_video.name}")
+
+        elapsed_seconds = perf_counter() - started_at
+        self._emit(progress, 1.0, "Done")
+
+        return PipelineResult(
+            input_video=video_path,
+            subtitle_file=subtitle_file,
+            burned_video=burned_video,
+            detected_language=transcription.metadata.detected_language,
+            device_label=transcription.metadata.device_label,
+            segment_count=segment_count,
+            elapsed_seconds=elapsed_seconds,
+            preview_text=preview_text,
+            warning_messages=transcription.warning_messages,
+        )
+
+    @staticmethod
+    def _parse_srt_summary(srt_text: str) -> tuple[int, str]:
+        """Return (segment_count, preview_text) parsed from a raw SRT string."""
+        blocks = [b.strip() for b in srt_text.strip().split("\n\n") if b.strip()]
+        segment_count = len(blocks)
+        preview_lines: list[str] = []
+        for i, block in enumerate(blocks[:5], start=1):
+            lines = block.splitlines()
+            text = " ".join(lines[2:]) if len(lines) > 2 else ""
+            if text:
+                preview_lines.append(f"{i}. {text}")
+        return segment_count, "\n".join(preview_lines)
 
     @staticmethod
     def _emit(progress: ProgressReporter | None, value: float, message: str) -> None:
