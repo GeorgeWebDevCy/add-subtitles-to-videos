@@ -45,6 +45,56 @@ from ..models import PipelineResult, ProcessingOptions, TranscriptionResult
 from ..services.pipeline import SubtitlePipeline
 
 
+class BatchProcessingThread(QThread):
+    progress_changed = Signal(int, str)
+    job_started = Signal(int, int, str)
+    log_message = Signal(str)
+    completed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, files: list[Path], options: ProcessingOptions) -> None:
+        super().__init__()
+        self._files = files
+        self._options = options
+
+    def run(self) -> None:
+        try:
+            pipeline = SubtitlePipeline()
+            results: list[PipelineResult] = []
+            total_files = len(self._files)
+
+            for file_index, video_path in enumerate(self._files):
+                self.job_started.emit(file_index + 1, total_files, video_path.name)
+                self.log_message.emit(
+                    f"[{file_index + 1}/{total_files}] Starting {video_path.name}"
+                )
+
+                def on_progress(
+                    stage_progress: float,
+                    message: str,
+                    *,
+                    current_index: int = file_index,
+                    current_path: Path = video_path,
+                ) -> None:
+                    overall_progress = int(((current_index + stage_progress) / total_files) * 100)
+                    self.progress_changed.emit(overall_progress, f"{current_path.name}: {message}")
+
+                def on_log(message: str, *, current_path: Path = video_path) -> None:
+                    self.log_message.emit(f"{current_path.name}: {message}")
+
+                result = pipeline.process_video(
+                    video_path,
+                    self._options,
+                    progress=on_progress,
+                    log=on_log,
+                )
+                results.append(result)
+
+            self.completed.emit(results)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class TranscriptionThread(QThread):
     progress_changed = Signal(int, str)
     log_message = Signal(str)
