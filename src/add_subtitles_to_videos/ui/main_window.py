@@ -714,8 +714,11 @@ class MainWindow(QMainWindow):
             self.showFullScreen()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        active = self._transcription_thread or self._finalize_thread
-        if active is not None and active.isRunning():
+        running = any(
+            t is not None and t.isRunning()
+            for t in (self._transcription_thread, self._finalize_thread)
+        )
+        if running:
             QMessageBox.information(
                 self,
                 APP_NAME,
