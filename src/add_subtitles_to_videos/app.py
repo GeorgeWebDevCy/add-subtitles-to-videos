@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from multiprocessing import freeze_support
 import os
 import sys
 
@@ -29,6 +30,7 @@ def _ensure_standard_streams() -> None:
 
 
 def run() -> int:
+    freeze_support()
     _ensure_standard_streams()
 
     app = QApplication(sys.argv)
@@ -38,5 +40,5 @@ def run() -> int:
     app.setStyleSheet(application_stylesheet())
 
     window = MainWindow()
-    window.showFullScreen()
+    window.showMaximized()
     return app.exec()

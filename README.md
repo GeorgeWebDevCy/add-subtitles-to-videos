@@ -1,21 +1,38 @@
 # Subtitle Foundry
 
-Cross-platform desktop app for turning spoken video into subtitle files and optional burned-in exports.
+Cross-platform desktop app for transcribing spoken video, translating subtitle text, and exporting subtitle files with optional burned-in video.
 
-The first workflow is focused on Greek videos that need English subtitles, but the app also supports source-language subtitles and other source-language choices.
+The current release is a Europe-focused multilingual workflow: local Whisper handles speech recognition, an online text-translation provider handles target-language translation, and the app always pauses for review before export.
 
 ## What It Does
 
 - Select one or more videos from anywhere on disk.
 - Choose the source language or let Whisper detect it.
-- Generate subtitles in English or in the source language.
+- Choose a target subtitle language from the launch set.
+- Transcribe speech locally with Whisper, then translate subtitle text through an OpenAI-compatible API.
+- Review the source transcript and translated SRT side by side before export.
 - Export an `.srt` file.
 - Optionally burn the subtitles directly into a new video file.
-- Run fully locally with `openai-whisper` and a bundled FFmpeg binary.
+- Run local transcription with `openai-whisper` and a bundled FFmpeg binary while keeping translation text-only.
 
-## Why Local Whisper By Default
+## Launch Languages
 
-The hosted OpenAI Whisper API is usable, but it is not the best default for this repo because it adds cost and requires an API key. The app in this repository uses local `openai-whisper`, which is free to run on your own machine and works offline once the model has been downloaded.
+- English
+- Greek
+- Turkish
+- German
+- French
+- Italian
+- Spanish
+- Portuguese
+- Dutch
+- Romanian
+- Polish
+- Czech
+
+## Why Local Whisper + Online Translation
+
+Speech recognition stays local so large video audio does not have to be uploaded, and Whisper can keep using your CPU or GPU directly. Translation is handled separately through an OpenAI-compatible text API so the app can support many target languages instead of Whisper's built-in translate-to-English-only path.
 
 ## Quick Start
 
@@ -34,14 +51,22 @@ uv run add-subtitles-to-videos
 
 On Windows, you can also double-click `launch-subtitle-foundry.vbs` to start the app without leaving a terminal window open.
 
+Before running translated workflows, configure these values in the app:
+
+- Translation base URL
+- Translation model
+- Translation API key
+
+If the source and target languages match, the app can run transcription-only without translation credentials.
+
 ## Notes
 
 - The first run downloads the selected Whisper model, so it can take a while.
-- `medium` is a good starting point for Greek-to-English subtitle work, with `large-v3` as the quality upgrade.
-- Avoid `turbo` for this specific job. Whisper translation is more reliable with the multilingual models above.
+- `large-v3` is the default because accuracy matters more than speed for subtitle review.
+- Whisper is used only for transcription and language detection. Many-to-many translation is handled by the configured text provider.
 - On Windows x64, the project is pinned to the official CUDA 12.4 PyTorch wheel so NVIDIA GPUs can be used automatically when available.
 - Burned-in subtitle exports are written with a new `.subtitled` suffix so your original files stay untouched.
-- The app now surfaces active file, queue position, elapsed time, active engine, subtitle preview, and automatic review flags so you can tell when Whisper is loading or if the translation looks suspicious.
+- The app surfaces active file, queue position, elapsed time, active engine, translation-provider status, subtitle preview, and automatic review flags so you can tell when the workflow needs human attention.
 
 ## Packaging Direction
 

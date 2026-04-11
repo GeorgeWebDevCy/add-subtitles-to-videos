@@ -2,20 +2,25 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from time import perf_counter
 import wave
 
 import numpy as np
 import torch
 import whisper
 
-from ..models import ProcessingOptions, SubtitleMode, SubtitleSegment, TranscriptionMetadata
+from . import OperationCancelledError
+from ..models import ProcessingOptions, SubtitleSegment, TranscriptionMetadata
 
 LogReporter = Callable[[str], None]
+CancelChecker = Callable[[], bool]
 
 
 class WhisperService:
+    _GLOBAL_MODEL_CACHE: dict[tuple[str, str], whisper.model.Whisper] = {}
+
     def __init__(self) -> None:
-        self._model_cache: dict[tuple[str, str], whisper.model.Whisper] = {}
+        self._model_cache = self._GLOBAL_MODEL_CACHE
 
     def transcribe(
         self,
@@ -23,32 +28,37 @@ class WhisperService:
         options: ProcessingOptions,
         *,
         log: LogReporter | None = None,
+        cancel_requested: CancelChecker | None = None,
     ) -> tuple[list[SubtitleSegment], TranscriptionMetadata]:
-        task = "translate" if options.subtitle_mode == SubtitleMode.ENGLISH else "transcribe"
+        started_at = perf_counter()
+        self._check_cancel(cancel_requested)
         source_language = None
         if options.source_language and options.source_language != "auto":
             source_language = options.source_language
         device = self._preferred_device()
         fp16_enabled = device == "cuda"
 
+        cache_key = (options.whisper_model, device)
+        load_message = "Reusing" if cache_key in self._model_cache else "Loading"
         self._emit_log(
             log,
-            f"Loading Whisper model '{options.whisper_model}' on {self._device_label(device)}",
+            f"{load_message} Whisper model '{options.whisper_model}' on {self._device_label(device)}",
         )
-        self._emit_log(log, f"Whisper task: {task}")
+        self._emit_log(log, "Whisper task: transcribe")
 
         model = self._get_model(options.whisper_model, device)
+        self._check_cancel(cancel_requested)
         audio = self._read_pcm_wave(audio_path)
+        self._check_cancel(cancel_requested)
         result = model.transcribe(
             audio,
             language=source_language,
-            task=task,
+            task="transcribe",
             fp16=fp16_enabled,
-            # `verbose=False` enables Whisper's tqdm progress bar, which tries to write
-            # to stderr. In a windowed PyInstaller app, stderr can be None.
             verbose=None,
             condition_on_previous_text=False,
         )
+        self._check_cancel(cancel_requested)
 
         items: list[SubtitleSegment] = []
         for segment in result.get("segments", []):
@@ -68,13 +78,24 @@ class WhisperService:
             detected_language_probability=None,
             duration_seconds=len(audio) / 16000 if len(audio) else None,
             device_label=self._device_label(device),
-            task_label=task,
+            task_label="transcribe",
         )
 
         if metadata.detected_language:
             self._emit_log(log, f"Detected language: {metadata.detected_language}")
+        metadata.stage_durations["whisper_seconds"] = perf_counter() - started_at
 
         return items, metadata
+
+    def preload_model(self, model_name: str, *, log: LogReporter | None = None) -> None:
+        device = self._preferred_device()
+        cache_key = (model_name, device)
+        load_message = "Reusing" if cache_key in self._model_cache else "Loading"
+        self._emit_log(
+            log,
+            f"{load_message} Whisper model '{model_name}' on {self._device_label(device)}",
+        )
+        self._get_model(model_name, device)
 
     def _get_model(self, model_name: str, device: str) -> whisper.model.Whisper:
         cache_key = (model_name, device)
@@ -118,3 +139,8 @@ class WhisperService:
     def _emit_log(log: LogReporter | None, message: str) -> None:
         if log is not None:
             log(message)
+
+    @staticmethod
+    def _check_cancel(cancel_requested: CancelChecker | None) -> None:
+        if cancel_requested is not None and cancel_requested():
+            raise OperationCancelledError("Processing stopped by user.")

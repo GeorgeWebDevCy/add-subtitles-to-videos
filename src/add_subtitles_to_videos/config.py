@@ -2,40 +2,45 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .models import OutputMode, SubtitleMode
+from .languages import source_language_options, target_language_options
+from .models import OutputMode, WorkflowProfile
 
 APP_NAME = "Subtitle Foundry"
-APP_TAGLINE = "Translate speech into subtitles and burn them straight into video."
+APP_TAGLINE = "Transcribe local video, translate subtitles, and review everything before export."
 DEFAULT_OUTPUT_DIRECTORY = Path.cwd() / "exports"
 DEFAULT_MAX_LINE_LENGTH = 42
 DEFAULT_SUBTITLE_FONT_SIZE = 18
-DEFAULT_WHISPER_MODEL = "medium"
+DEFAULT_WHISPER_MODEL = "large-v3"
+DEFAULT_OUTPUT_MODE = OutputMode.SRT_ONLY
+DEFAULT_SOURCE_LANGUAGE = "auto"
+DEFAULT_TARGET_LANGUAGE = "en"
+DEFAULT_TRANSLATION_PROVIDER = "openai_compatible"
+DEFAULT_TRANSLATION_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_TRANSLATION_MODEL = "gpt-4.1-mini"
+DEFAULT_MAX_PARALLEL_TRANSLATION_BATCHES = 2
+DEFAULT_WORKFLOW_PROFILE = WorkflowProfile.EUROPE_MULTILINGUAL
 VIDEO_FILE_FILTER = "Video Files (*.mp4 *.mov *.mkv *.avi *.m4v *.webm)"
 
-LANGUAGE_OPTIONS: list[tuple[str, str]] = [
-    ("auto", "Auto detect"),
-    ("el", "Greek"),
-    ("en", "English"),
-    ("tr", "Turkish"),
-    ("de", "German"),
-    ("fr", "French"),
-    ("it", "Italian"),
-    ("es", "Spanish"),
+SOURCE_LANGUAGE_OPTIONS: list[tuple[str, str]] = [
+    (language.code, language.label) for language in source_language_options()
 ]
 
-SUBTITLE_MODE_OPTIONS: list[tuple[SubtitleMode, str]] = [
-    (SubtitleMode.ENGLISH, "English translation"),
-    (SubtitleMode.SOURCE, "Source language"),
+TARGET_LANGUAGE_OPTIONS: list[tuple[str, str]] = [
+    (language.code, language.label) for language in target_language_options()
+]
+
+TRANSLATION_PROVIDER_OPTIONS: list[tuple[str, str]] = [
+    ("openai_compatible", "OpenAI-compatible text translation"),
 ]
 
 OUTPUT_MODE_OPTIONS: list[tuple[OutputMode, str]] = [
-    (OutputMode.BURNED_VIDEO, "Generate SRT and burned-in video"),
     (OutputMode.SRT_ONLY, "Generate SRT only"),
+    (OutputMode.BURNED_VIDEO, "Generate SRT and burned-in video"),
 ]
 
 WHISPER_MODEL_OPTIONS: list[tuple[str, str]] = [
     ("base", "base - smallest practical local model"),
     ("small", "small - quickest download, lighter accuracy"),
-    ("medium", "medium - balanced default for Greek speech"),
+    ("medium", "medium - faster balance for everyday use"),
     ("large-v3", "large-v3 - best accuracy, larger download"),
 ]
