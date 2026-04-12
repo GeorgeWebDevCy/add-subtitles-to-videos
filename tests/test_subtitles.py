@@ -1540,3 +1540,81 @@ def test_standalone_edit_leave_restores_panel(monkeypatch, tmp_path) -> None:
     assert window._review_translated_title.text() == "Translated Subtitle Draft"
 
     window.close()
+
+
+def test_standalone_edit_save_overwrites_srt(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    monkeypatch.setattr(main_window_module, "ExistingSubtitleBurnThread", ImmediateExistingBurnThread)
+
+    srt_path = tmp_path / "demo.srt"
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+    video_path = tmp_path / "demo.mp4"
+    video_path.write_bytes(b"video")
+
+    window = main_window_module.MainWindow()
+    window.output_directory_edit.setText(str(tmp_path))
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(srt_path))
+    window._start_existing_srt_edit()
+
+    window.translated_srt_editor.setPlainText("1\n00:00:00,000 --> 00:00:01,500\nhello world")
+    window._on_approve_clicked()
+
+    assert srt_path.read_text(encoding="utf-8") == "1\n00:00:00,000 --> 00:00:01,500\nhello world\n"
+    assert window._review_mode is None
+    assert window._content_stack.currentIndex() == 0
+    assert _pump_events_until(lambda: window.status_label.text() == "Standalone subtitle burn finished.")
+
+    window.close()
+
+
+def test_standalone_edit_validation_rejects_empty(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+
+    srt_path = tmp_path / "demo.srt"
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+    video_path = tmp_path / "demo.mp4"
+    video_path.write_bytes(b"video")
+
+    window = main_window_module.MainWindow()
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(srt_path))
+    window._start_existing_srt_edit()
+
+    window.translated_srt_editor.setPlainText("")
+    window._on_approve_clicked()
+
+    # Stays in review panel, file untouched
+    assert window._content_stack.currentIndex() == 1
+    assert window._review_mode == "standalone_edit"
+    assert window.review_warning_label.isHidden() is False
+    assert srt_path.read_text(encoding="utf-8") == "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
+
+    window.close()
+
+
+def test_standalone_edit_validation_rejects_invalid_srt(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+
+    srt_path = tmp_path / "demo.srt"
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+    video_path = tmp_path / "demo.mp4"
+    video_path.write_bytes(b"video")
+
+    window = main_window_module.MainWindow()
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(srt_path))
+    window._start_existing_srt_edit()
+
+    window.translated_srt_editor.setPlainText("this is not valid srt content at all")
+    window._on_approve_clicked()
+
+    assert window._content_stack.currentIndex() == 1
+    assert window._review_mode == "standalone_edit"
+    assert window.review_warning_label.isHidden() is False
+    assert srt_path.read_text(encoding="utf-8") == "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
+
+    window.close()

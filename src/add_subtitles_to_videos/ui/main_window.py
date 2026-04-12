@@ -1018,6 +1018,9 @@ class MainWindow(QMainWindow):
         pass  # TODO: Task 6 — implement cancel standalone edit
 
     def _on_approve_clicked(self) -> None:
+        if self._review_mode == "standalone_edit":
+            self._on_standalone_edit_save()
+            return
         assert self._current_transcription is not None
         srt_text = self.translated_srt_editor.toPlainText().strip()
         if not srt_text:
@@ -1032,6 +1035,27 @@ class MainWindow(QMainWindow):
             return
 
         self._start_finalize(srt_text + "\n")
+
+    def _on_standalone_edit_save(self) -> None:
+        srt_text = self.translated_srt_editor.toPlainText().strip()
+        if not srt_text:
+            self.review_warning_label.setText("SRT content cannot be empty.")
+            self.review_warning_label.setVisible(True)
+            return
+        try:
+            parse_srt_text(srt_text)
+        except ValueError:
+            self.review_warning_label.setText(
+                "The SRT text is not valid. Check that each block has an index, a timestamp line, and text."
+            )
+            self.review_warning_label.setVisible(True)
+            return
+
+        srt_path = Path(self.existing_burn_subtitle_edit.text()).expanduser().resolve()
+        srt_path.write_text(srt_text + "\n", encoding="utf-8")
+
+        self._leave_standalone_edit_mode()
+        self._start_existing_burn()
 
     def _on_use_original_clicked(self) -> None:
         assert self._current_transcription is not None
