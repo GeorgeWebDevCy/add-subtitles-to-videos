@@ -191,7 +191,7 @@ class ModelPreloadThread(QThread):
         try:
             slot = _WORKER_POOL.acquire()
             if slot is None:
-                self.completed.emit(self._model_name)
+                self.failed.emit("No free worker slot available for model preload.")
                 return
             slot_index, client, device = slot
             try:
@@ -860,7 +860,9 @@ class MainWindow(QMainWindow):
             self.existing_burn_subtitle_edit.setText(selected_file)
 
     def _start_processing(self) -> None:
-        transcribing = self._transcription_thread is not None and self._transcription_thread.isRunning()
+        transcribing = bool(self._transcription_threads) or (
+            self._transcription_thread is not None and self._transcription_thread.isRunning()
+        )
         finalizing = self._finalize_thread is not None and self._finalize_thread.isRunning()
         existing_burn_running = (
             self._existing_burn_thread is not None and self._existing_burn_thread.isRunning()
@@ -1406,8 +1408,12 @@ class MainWindow(QMainWindow):
             )
             return
 
-        _QUEUE_DISPATCHER.cancel_job(next_index)
-        self._start_transcription(next_index, as_prefetch=False)
+        _QUEUE_DISPATCHER.enqueue(DispatchJob(
+            file_index=next_index,
+            video_path=self._selected_files[next_index],
+            options=self._current_options,
+        ))
+        self._dispatch_pending()
 
     def _maybe_start_prefetch(self) -> None:
         if self._stop_requested or self._current_transcription is None:
@@ -1430,8 +1436,12 @@ class MainWindow(QMainWindow):
                 self._refresh_review_queue_label()
             return
 
-        _QUEUE_DISPATCHER.cancel_job(next_index)
-        self._start_transcription(next_index, as_prefetch=True)
+        _QUEUE_DISPATCHER.enqueue(DispatchJob(
+            file_index=next_index,
+            video_path=self._selected_files[next_index],
+            options=self._current_options,
+        ))
+        self._dispatch_pending()
         self._refresh_review_queue_label()
 
     def _clear_prefetch_state(self) -> None:
@@ -1492,7 +1502,8 @@ class MainWindow(QMainWindow):
                 del self._transcription_threads[slot_index]
                 _WORKER_POOL.release(slot_index)
                 self._dispatch_pending()
-                break
+                thread.deleteLater()
+                return
 
         if (
             was_transcription_thread
