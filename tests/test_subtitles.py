@@ -203,7 +203,7 @@ class DelayedTranscriptionThread(QThread):
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, video_path, options, translation_service, file_index, total_files) -> None:
+    def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:
         super().__init__()
         self._video_path = video_path
 
@@ -222,7 +222,7 @@ class CancellableTranscriptionThread(QThread):
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, video_path, options, translation_service, file_index, total_files) -> None:
+    def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:
         super().__init__()
 
     def request_stop(self) -> None:
@@ -241,7 +241,7 @@ class ImmediateTranscriptionThread(QThread):
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, video_path, options, translation_service, file_index, total_files) -> None:
+    def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:
         super().__init__()
         self._video_path = video_path
 
@@ -345,7 +345,7 @@ class ImmediateThenDelayedPrefetchThread(QThread):
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, video_path, options, translation_service, file_index, total_files) -> None:
+    def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:
         super().__init__()
         self._video_path = video_path
         self._file_index = file_index
@@ -369,7 +369,7 @@ class ImmediateThenCancellablePrefetchThread(QThread):
     failed = Signal(str)
     started_files: list[str] = []
 
-    def __init__(self, video_path, options, translation_service, file_index, total_files) -> None:
+    def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:
         super().__init__()
         self._video_path = video_path
         self._file_index = file_index

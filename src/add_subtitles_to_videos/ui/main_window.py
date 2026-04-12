@@ -63,9 +63,10 @@ from ..services.translation import (
     TranslationServiceError,
 )
 from ..services.power import create_sleep_inhibitor
-from ..services.whisper_worker import WhisperWorkerClient
+from ..services.worker_pool import WorkerPool, QueueDispatcher, DispatchJob
 
-TRANSCRIPTION_WORKER = WhisperWorkerClient()
+_WORKER_POOL = WorkerPool()
+_QUEUE_DISPATCHER = QueueDispatcher(_WORKER_POOL)
 
 
 class TranscriptionThread(QThread):
@@ -82,6 +83,8 @@ class TranscriptionThread(QThread):
         translation_service: OpenAICompatibleTranslationService | None,
         file_index: int,
         total_files: int,
+        whisper_worker=None,
+        device_override: str | None = None,
     ) -> None:
         super().__init__()
         self._video_path = video_path
@@ -89,11 +92,13 @@ class TranscriptionThread(QThread):
         self._translation_service = translation_service
         self._file_index = file_index
         self._total_files = total_files
+        self._whisper_worker = whisper_worker
+        self._device_override = device_override
 
     def run(self) -> None:
         try:
             pipeline = SubtitlePipeline(
-                whisper_service=TRANSCRIPTION_WORKER,
+                whisper_service=self._whisper_worker,
                 translation_service=self._translation_service,
             )
 
@@ -184,7 +189,19 @@ class ModelPreloadThread(QThread):
 
     def run(self) -> None:
         try:
-            TRANSCRIPTION_WORKER.preload_model(self._model_name, log=self.log_message.emit)
+            slot = _WORKER_POOL.acquire()
+            if slot is None:
+                self.completed.emit(self._model_name)
+                return
+            slot_index, client, device = slot
+            try:
+                client.preload_model(
+                    self._model_name,
+                    log=self.log_message.emit,
+                    device_override=device,
+                )
+            finally:
+                _WORKER_POOL.release(slot_index)
             self.completed.emit(self._model_name)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -247,6 +264,7 @@ class MainWindow(QMainWindow):
         self._all_results: list[PipelineResult] = []
         self._current_transcription: TranscriptionResult | None = None
         self._transcription_thread: TranscriptionThread | None = None
+        self._transcription_threads: dict[int, TranscriptionThread] = {}  # slot_index -> thread
         self._finalize_thread: FinalizeThread | None = None
         self._existing_burn_thread: ExistingSubtitleBurnThread | None = None
         self._preload_thread: ModelPreloadThread | None = None
@@ -902,9 +920,40 @@ class MainWindow(QMainWindow):
         self._set_sleep_inhibition(True)
         self._set_busy(True)
         self._schedule_model_preload()
-        self._start_transcription(self._current_file_index, as_prefetch=False)
+        _QUEUE_DISPATCHER.cancel_all()  # clear any stale state
+        _QUEUE_DISPATCHER.enqueue(DispatchJob(
+            file_index=self._current_file_index,
+            video_path=self._selected_files[self._current_file_index],
+            options=self._current_options,
+        ))
+        self._dispatch_pending()
 
-    def _start_transcription(self, file_index: int, *, as_prefetch: bool) -> None:
+    def _dispatch_pending(self) -> None:
+        """Assign the next queued file to a free worker slot."""
+        if getattr(self, "_stop_requested", False):
+            return
+        while True:
+            result = _QUEUE_DISPATCHER.dispatch_next()
+            if result is None:
+                break
+            job, slot_index, client, device = result
+            self._start_transcription(
+                job.file_index,
+                as_prefetch=False,
+                worker_slot=slot_index,
+                worker_client=client,
+                worker_device=device,
+            )
+
+    def _start_transcription(
+        self,
+        file_index: int,
+        *,
+        as_prefetch: bool,
+        worker_slot: int = 0,
+        worker_client=None,
+        worker_device: str | None = None,
+    ) -> None:
         assert self._current_options is not None
         video_path = self._selected_files[file_index]
         total = len(self._selected_files)
@@ -919,12 +968,18 @@ class MainWindow(QMainWindow):
             self._append_log(f"[{file_index + 1}/{total}] Starting {video_path.name}")
             self.stop_button.setEnabled(True)
 
+        extra_kwargs = {}
+        if worker_client is not None:
+            extra_kwargs["whisper_worker"] = worker_client
+        if worker_device is not None:
+            extra_kwargs["device_override"] = worker_device
         thread = TranscriptionThread(
             video_path,
             self._current_options,
             self._current_translation_service,
             file_index,
             total,
+            **extra_kwargs,
         )
         if not as_prefetch:
             thread.progress_changed.connect(self._on_progress)
@@ -941,6 +996,7 @@ class MainWindow(QMainWindow):
         thread.failed.connect(self._on_failed)
         thread.finished.connect(lambda t=thread: self._on_thread_finished(t))
         self._transcription_thread = thread
+        self._transcription_threads[worker_slot] = thread
         self._active_transcription_index = file_index
         self._active_transcription_is_prefetch = as_prefetch
         thread.start()
@@ -1275,10 +1331,10 @@ class MainWindow(QMainWindow):
         self._append_log(message)
 
     def _request_stop(self) -> None:
+        transcription_threads = list(self._transcription_threads.values())
         active_threads = [
-            thread
-            for thread in (self._transcription_thread, self._finalize_thread, self._existing_burn_thread)
-            if thread is not None and thread.isRunning()
+            t for t in transcription_threads + [self._finalize_thread, self._existing_burn_thread]
+            if t is not None and t.isRunning()
         ]
         if (not active_threads and self._current_transcription is None) or self._stop_requested:
             return
@@ -1415,6 +1471,14 @@ class MainWindow(QMainWindow):
             self._existing_burn_thread = None
         elif self._preload_thread is thread:
             self._preload_thread = None
+
+        # Release worker slot and clean up dict entry
+        for slot_index, t in list(self._transcription_threads.items()):
+            if t is thread:
+                del self._transcription_threads[slot_index]
+                _WORKER_POOL.release(slot_index)
+                self._dispatch_pending()
+                break
 
         if (
             was_transcription_thread
@@ -1859,7 +1923,7 @@ class MainWindow(QMainWindow):
                 thread.wait(1000)
         self._gpu_poll_timer.stop()
         self._set_sleep_inhibition(False)
-        TRANSCRIPTION_WORKER.close()
+        _WORKER_POOL.close()
         super().closeEvent(event)
 
     @staticmethod
