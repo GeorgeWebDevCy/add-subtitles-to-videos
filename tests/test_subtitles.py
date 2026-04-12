@@ -1715,3 +1715,30 @@ def test_standalone_edit_cancel_dirty_prompts(monkeypatch, tmp_path) -> None:
     assert window._review_mode is None
 
     window.close()
+
+
+def test_standalone_edit_entry_rejects_wrong_extension(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    warning_calls: list[str] = []
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "warning",
+        lambda *a, **kw: warning_calls.append(a[2]),
+    )
+
+    txt_path = tmp_path / "demo.txt"
+    txt_path.write_text("not an srt", encoding="utf-8")
+    video_path = tmp_path / "demo.mp4"
+    video_path.write_bytes(b"video")
+
+    window = main_window_module.MainWindow()
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(txt_path))
+
+    window._start_existing_srt_edit()
+
+    assert window._content_stack.currentIndex() == 0
+    assert len(warning_calls) == 1
+
+    window.close()

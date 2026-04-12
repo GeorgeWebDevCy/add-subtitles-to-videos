@@ -260,9 +260,6 @@ class MainWindow(QMainWindow):
         self._review_mode: str | None = None
         self._standalone_edit_original_text: str | None = None
         self._current_review_draft_path: Path | None = None
-        self._current_review_source_path: Path | None = None
-        self._current_review_draft_tag: str | None = None
-        self._current_review_original_text: str | None = None
         self._last_autosaved_review_text: str | None = None
         self._existing_burn_video_path: Path | None = None
         self._existing_burn_subtitle_path: Path | None = None
@@ -1064,7 +1061,14 @@ class MainWindow(QMainWindow):
             return
 
         srt_path = Path(self.existing_burn_subtitle_edit.text()).expanduser().resolve()
-        srt_path.write_text(srt_text + "\n", encoding="utf-8")
+        try:
+            srt_path.write_text(srt_text + "\n", encoding="utf-8")
+        except OSError:
+            self.review_warning_label.setText(
+                f"Could not write {srt_path.name} — the file may be read-only or on a disconnected drive."
+            )
+            self.review_warning_label.setVisible(True)
+            return
 
         self._leave_standalone_edit_mode()
         self._start_existing_burn()
@@ -1072,7 +1076,14 @@ class MainWindow(QMainWindow):
     def _on_use_original_clicked(self) -> None:
         if self._review_mode == "standalone_edit":
             srt_path = Path(self.existing_burn_subtitle_edit.text()).expanduser().resolve()
-            content = srt_path.read_text(encoding="utf-8")
+            try:
+                content = srt_path.read_text(encoding="utf-8")
+            except OSError:
+                self.review_warning_label.setText(
+                    f"Could not read {srt_path.name} — the file may have been moved or deleted."
+                )
+                self.review_warning_label.setVisible(True)
+                return
             self._standalone_edit_original_text = content
             self.translated_srt_editor.setPlainText(content.strip())
             return
@@ -1116,6 +1127,7 @@ class MainWindow(QMainWindow):
         self.cancel_edit_button.setVisible(True)
         self.review_warning_label.setVisible(False)
 
+        self.review_autosave_label.setVisible(False)
         self._content_stack.setCurrentIndex(1)
 
     def _leave_standalone_edit_mode(self) -> None:
@@ -1136,6 +1148,7 @@ class MainWindow(QMainWindow):
         self.approve_button.setText("Approve & Continue")
         self.cancel_edit_button.setVisible(False)
         self.review_warning_label.setVisible(False)
+        self.review_autosave_label.setVisible(True)
 
         self._content_stack.setCurrentIndex(0)
 
@@ -1643,6 +1656,7 @@ class MainWindow(QMainWindow):
             self.browse_existing_burn_video_button,
             self.existing_burn_subtitle_edit,
             self.browse_existing_burn_subtitle_button,
+            self.edit_existing_button,
             self.burn_existing_button,
             self.run_button,
             self.source_language_combo,
