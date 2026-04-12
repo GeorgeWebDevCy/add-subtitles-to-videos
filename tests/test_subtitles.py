@@ -1416,3 +1416,24 @@ def test_main_window_stop_cancels_background_prefetch_from_review(monkeypatch, t
     assert window.queue_value.text() == "Stopped after 0 of 2 finished"
 
     window.close()
+
+
+def test_standalone_edit_panel_infrastructure(monkeypatch) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    window = main_window_module.MainWindow()
+
+    # New widget attributes exist
+    assert hasattr(window, "_review_source_pane")
+    assert hasattr(window, "_review_panel_title")
+    assert hasattr(window, "_review_translated_title")
+    assert hasattr(window, "cancel_edit_button")
+    assert hasattr(window, "_standalone_edit_original_text")
+
+    # Cancel button starts hidden
+    assert window.cancel_edit_button.isVisible() is False
+
+    # Source pane is not explicitly hidden (visible once window is shown)
+    assert window._review_source_pane.isHidden() is False
+
+    window.close()

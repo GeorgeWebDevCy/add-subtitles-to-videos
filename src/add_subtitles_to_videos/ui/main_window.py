@@ -257,7 +257,12 @@ class MainWindow(QMainWindow):
         self._review_started_at: float | None = None
         self._active_transcription_index: int | None = None
         self._active_transcription_is_prefetch = False
+        self._review_mode: str | None = None
+        self._standalone_edit_original_text: str | None = None
         self._current_review_draft_path: Path | None = None
+        self._current_review_source_path: Path | None = None
+        self._current_review_draft_tag: str | None = None
+        self._current_review_original_text: str | None = None
         self._last_autosaved_review_text: str | None = None
         self._existing_burn_video_path: Path | None = None
         self._existing_burn_subtitle_path: Path | None = None
@@ -553,7 +558,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(burn_title)
 
         burn_hint = QLabel(
-            "If you generated SRT-only output, pick a video and an existing .srt here to create a burned-in video without re-running Whisper."
+            "If you generated SRT-only output, pick a video and an existing .srt here to edit it later or create a burned-in video without re-running Whisper."
         )
         burn_hint.setObjectName("supportingText")
         burn_hint.setWordWrap(True)
@@ -581,10 +586,19 @@ class MainWindow(QMainWindow):
         burn_subtitle_row.addWidget(self.browse_existing_burn_subtitle_button)
         layout.addLayout(burn_subtitle_row)
 
+        burn_action_row = QHBoxLayout()
+
+        self.edit_existing_button = QPushButton("Edit Existing SRT")
+        self.edit_existing_button.setObjectName("secondaryButton")
+        self.edit_existing_button.clicked.connect(self._start_existing_srt_edit)
+
         self.burn_existing_button = QPushButton("Burn Existing SRT")
         self.burn_existing_button.setObjectName("secondaryButton")
         self.burn_existing_button.clicked.connect(self._start_existing_burn)
-        layout.addWidget(self.burn_existing_button)
+
+        burn_action_row.addWidget(self.edit_existing_button)
+        burn_action_row.addWidget(self.burn_existing_button)
+        layout.addLayout(burn_action_row)
         return card
 
     def _create_run_card(self) -> QWidget:
@@ -689,7 +703,8 @@ class MainWindow(QMainWindow):
         layout.setSpacing(14)
 
         header_row = QHBoxLayout()
-        header_row.addWidget(self._section_title("Review Translation"))
+        self._review_panel_title = self._section_title("Review Translation")
+        header_row.addWidget(self._review_panel_title)
 
         self.review_file_label = QLabel()
         self.review_file_label.setObjectName("statusValue")
@@ -724,15 +739,16 @@ class MainWindow(QMainWindow):
         self.source_srt_view.setReadOnly(True)
         self.source_srt_view.setPlaceholderText("Source-language SRT will appear here.")
         source_layout.addWidget(self.source_srt_view, stretch=1)
+        self._review_source_pane = source_card
         transcript_splitter.addWidget(source_card)
 
         translated_card = self._card()
         translated_layout = QVBoxLayout(translated_card)
         translated_layout.setContentsMargins(16, 16, 16, 16)
         translated_layout.setSpacing(10)
-        translated_title = QLabel("Translated Subtitle Draft")
-        translated_title.setObjectName("miniTitle")
-        translated_layout.addWidget(translated_title)
+        self._review_translated_title = QLabel("Translated Subtitle Draft")
+        self._review_translated_title.setObjectName("miniTitle")
+        translated_layout.addWidget(self._review_translated_title)
 
         self.translated_srt_editor = QPlainTextEdit()
         self.translated_srt_editor.setObjectName("translatedTranscriptPanel")
@@ -773,7 +789,13 @@ class MainWindow(QMainWindow):
         self.approve_button.setObjectName("runButton")
         self.approve_button.clicked.connect(self._on_approve_clicked)
 
+        self.cancel_edit_button = QPushButton("Cancel")
+        self.cancel_edit_button.setObjectName("secondaryButton")
+        self.cancel_edit_button.clicked.connect(self._on_cancel_edit_clicked)
+        self.cancel_edit_button.setVisible(False)
+
         button_row.addWidget(self.insert_missing_segment_button)
+        button_row.addWidget(self.cancel_edit_button)
         button_row.addWidget(self.use_original_button)
         button_row.addWidget(self.approve_button)
         layout.addLayout(button_row)
@@ -992,6 +1014,9 @@ class MainWindow(QMainWindow):
             self.translated_srt_editor.setPlainText(template + "\n")
         self.translated_srt_editor.setFocus()
 
+    def _on_cancel_edit_clicked(self) -> None:
+        pass  # TODO: Task 6 — implement cancel standalone edit
+
     def _on_approve_clicked(self) -> None:
         assert self._current_transcription is not None
         srt_text = self.translated_srt_editor.toPlainText().strip()
@@ -1011,6 +1036,9 @@ class MainWindow(QMainWindow):
     def _on_use_original_clicked(self) -> None:
         assert self._current_transcription is not None
         self._start_finalize(self._current_transcription.translated_srt_text)
+
+    def _start_existing_srt_edit(self) -> None:
+        pass  # TODO: Task 2 — implement standalone SRT edit entry point
 
     def _start_existing_burn(self) -> None:
         running = any(
