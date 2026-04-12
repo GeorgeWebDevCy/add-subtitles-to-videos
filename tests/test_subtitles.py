@@ -1,3 +1,5 @@
+import importlib
+import runpy
 import sys
 import threading
 import time
@@ -937,16 +939,57 @@ def test_app_replaces_missing_console_streams(monkeypatch) -> None:
 def test_app_opens_window_maximized(monkeypatch) -> None:
     fake_app = MagicMock()
     fake_window = MagicMock()
+    fake_icon = MagicMock()
+    fake_icon.isNull.return_value = False
 
     monkeypatch.setattr(app_module, "_ensure_standard_streams", lambda: None)
     monkeypatch.setattr(app_module, "QApplication", lambda argv: fake_app)
     monkeypatch.setattr(app_module, "MainWindow", lambda: fake_window)
     monkeypatch.setattr(app_module, "application_stylesheet", lambda: "")
+    monkeypatch.setattr(app_module, "_branding_icon_path", lambda: Path("assets/branding/subtitle-foundry-icon.ico"))
+    monkeypatch.setattr(app_module, "QIcon", lambda path: fake_icon)
 
     fake_app.exec.return_value = 0
+    fake_app.windowIcon.return_value = fake_icon
 
     assert app_module.run() == 0
+    fake_app.setWindowIcon.assert_called_once_with(fake_icon)
+    fake_window.setWindowIcon.assert_called_once_with(fake_icon)
     fake_window.showMaximized.assert_called_once()
+
+
+def test_branding_icon_path_uses_runtime_root(monkeypatch, tmp_path) -> None:
+    icon_path = tmp_path / "assets" / "branding" / "subtitle-foundry-icon.ico"
+    icon_path.parent.mkdir(parents=True)
+    icon_path.write_bytes(b"icon")
+
+    monkeypatch.setattr(app_module, "_runtime_root", lambda: tmp_path)
+
+    assert app_module._branding_icon_path() == icon_path
+
+
+def test_branding_icon_path_returns_none_when_missing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(app_module, "_runtime_root", lambda: tmp_path)
+
+    assert app_module._branding_icon_path() is None
+
+
+def test_package_main_supports_script_execution(monkeypatch) -> None:
+    called = False
+    main_module = importlib.import_module("add_subtitles_to_videos.main")
+
+    def fake_main() -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(main_module, "main", fake_main)
+
+    runpy.run_path(
+        str(Path("src/add_subtitles_to_videos/__main__.py")),
+        run_name="__main__",
+    )
+
+    assert called is True
 
 
 def test_main_window_defaults_to_multilingual_workflow(monkeypatch) -> None:

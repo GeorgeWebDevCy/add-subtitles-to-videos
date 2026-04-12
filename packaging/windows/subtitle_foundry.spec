@@ -10,12 +10,26 @@ ASSET_DIR = ROOT / "assets" / "branding"
 
 datas = []
 datas += collect_data_files("whisper")
+datas += collect_data_files("faster_whisper")
 datas += collect_data_files("imageio_ffmpeg")
+datas += [
+    (str(ASSET_DIR / "subtitle-foundry-icon.ico"), "assets/branding"),
+    (str(ASSET_DIR / "subtitle-foundry-icon.png"), "assets/branding"),
+]
 
 binaries = []
 binaries += collect_dynamic_libs("torch")
+binaries += collect_dynamic_libs("ctranslate2")
+binaries += collect_dynamic_libs("av")
+binaries += collect_dynamic_libs("onnxruntime")
 
 hiddenimports = []
+hiddenimports += collect_submodules("faster_whisper")
+hiddenimports += collect_submodules("ctranslate2")
+hiddenimports += collect_submodules("huggingface_hub")
+hiddenimports += collect_submodules("tokenizers")
+hiddenimports += collect_submodules("av")
+hiddenimports += collect_submodules("onnxruntime")
 hiddenimports += collect_submodules("tiktoken_ext")
 hiddenimports += collect_submodules("whisper")
 
