@@ -1507,3 +1507,36 @@ def test_standalone_edit_entry_rejects_missing_fields(monkeypatch, tmp_path) -> 
     assert len(warning_calls) == 1
 
     window.close()
+
+
+def test_standalone_edit_leave_restores_panel(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+
+    srt_path = tmp_path / "demo.srt"
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+    video_path = tmp_path / "demo.mp4"
+    video_path.write_bytes(b"video")
+
+    window = main_window_module.MainWindow()
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(srt_path))
+    window._start_existing_srt_edit()
+
+    # Confirm we are in standalone_edit mode
+    assert window._review_mode == "standalone_edit"
+
+    window._leave_standalone_edit_mode()
+
+    assert window._review_mode is None
+    assert window._standalone_edit_original_text is None
+    assert window._content_stack.currentIndex() == 0
+    assert window._review_source_pane.isHidden() is False
+    assert window.review_queue_label.isHidden() is False
+    assert window.cancel_edit_button.isHidden() is True
+    assert window.approve_button.text() == "Approve & Continue"
+    assert window.use_original_button.text() == "Use Original Draft"
+    assert window._review_panel_title.text() == "Review Translation"
+    assert window._review_translated_title.text() == "Translated Subtitle Draft"
+
+    window.close()

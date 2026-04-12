@@ -1076,6 +1076,27 @@ class MainWindow(QMainWindow):
 
         self._content_stack.setCurrentIndex(1)
 
+    def _leave_standalone_edit_mode(self) -> None:
+        self._review_mode = None
+        self._standalone_edit_original_text = None
+
+        self._review_panel_title.setText("Review Translation")
+        self.review_queue_label.setVisible(True)
+        self.review_summary_label.setText(
+            "Detected source language, target language, provider, and warnings will appear here once processing finishes."
+        )
+        self._review_source_pane.setVisible(True)
+        self._review_translated_title.setText("Translated Subtitle Draft")
+        self.translated_srt_editor.setPlaceholderText(
+            "Translated SRT text will appear here. Keep the original timed blocks, but you can add extra SRT blocks for missed subtitles."
+        )
+        self.use_original_button.setText("Use Original Draft")
+        self.approve_button.setText("Approve & Continue")
+        self.cancel_edit_button.setVisible(False)
+        self.review_warning_label.setVisible(False)
+
+        self._content_stack.setCurrentIndex(0)
+
     def _start_existing_burn(self) -> None:
         running = any(
             thread is not None and thread.isRunning()
