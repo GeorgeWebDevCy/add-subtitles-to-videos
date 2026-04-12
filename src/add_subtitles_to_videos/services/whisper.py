@@ -10,8 +10,10 @@ import numpy as np
 import torch
 try:
     from faster_whisper import WhisperModel as FasterWhisperModel
+    from faster_whisper import BatchedInferencePipeline
 except ImportError:  # pragma: no cover - dependency is installed in normal app environments
     FasterWhisperModel = None
+    BatchedInferencePipeline = None
 import whisper
 
 from . import OperationCancelledError
@@ -35,13 +37,15 @@ class WhisperService:
         *,
         log: LogReporter | None = None,
         cancel_requested: CancelChecker | None = None,
+        device_override: str | None = None,
+        progress_callback: Callable[[float], None] | None = None,
     ) -> tuple[list[SubtitleSegment], TranscriptionMetadata]:
         started_at = perf_counter()
         self._check_cancel(cancel_requested)
         source_language = None
         if options.source_language and options.source_language != "auto":
             source_language = options.source_language
-        device = self._preferred_device()
+        device = device_override if device_override else self._preferred_device()
         backend = self._backend_name(device)
 
         cache_key = (options.whisper_model, device, backend)
@@ -62,6 +66,7 @@ class WhisperService:
                 model,
                 audio_path,
                 source_language=source_language,
+                progress_callback=progress_callback,
             )
         else:
             items, metadata = self._transcribe_with_openai_whisper(
@@ -82,8 +87,8 @@ class WhisperService:
 
         return items, metadata
 
-    def preload_model(self, model_name: str, *, log: LogReporter | None = None) -> None:
-        device = self._preferred_device()
+    def preload_model(self, model_name: str, *, log: LogReporter | None = None, device_override: str | None = None) -> None:
+        device = device_override if device_override else self._preferred_device()
         backend = self._backend_name(device)
         cache_key = (model_name, device, backend)
         load_message = "Reusing" if cache_key in self._model_cache else "Loading"
@@ -106,11 +111,12 @@ class WhisperService:
         if backend == "faster-whisper":
             if FasterWhisperModel is None:
                 raise RuntimeError("faster-whisper is not installed.")
-            return FasterWhisperModel(
+            base_model = FasterWhisperModel(
                 model_name,
                 device=device,
                 compute_type=WhisperService._compute_type(device),
             )
+            return BatchedInferencePipeline(model=base_model)
         return whisper.load_model(model_name, device=device)
 
     @staticmethod
@@ -150,16 +156,19 @@ class WhisperService:
         audio_path: Path,
         *,
         source_language: str | None,
+        progress_callback: Callable[[float], None] | None = None,
     ) -> tuple[list[SubtitleSegment], TranscriptionMetadata]:
-        segments, info = model.transcribe(
+        segments_gen, info = model.transcribe(
             str(audio_path),
             language=source_language,
             task="transcribe",
             condition_on_previous_text=False,
         )
 
+        audio_duration: float = getattr(info, "duration", 0.0) or 0.0
+
         items: list[SubtitleSegment] = []
-        for segment in segments:
+        for segment in segments_gen:
             text = str(getattr(segment, "text", "")).strip()
             if not text:
                 continue
@@ -170,11 +179,14 @@ class WhisperService:
                     text=text,
                 )
             )
+            if progress_callback is not None and audio_duration > 0:
+                progress = min(1.0, float(getattr(segment, "end", 0.0)) / audio_duration)
+                progress_callback(progress)
 
         metadata = TranscriptionMetadata(
             detected_language=getattr(info, "language", None),
             detected_language_probability=getattr(info, "language_probability", None),
-            duration_seconds=getattr(info, "duration", None),
+            duration_seconds=audio_duration if audio_duration > 0 else None,
         )
         return items, metadata
 
