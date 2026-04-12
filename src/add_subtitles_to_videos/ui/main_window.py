@@ -1058,6 +1058,12 @@ class MainWindow(QMainWindow):
         self._start_existing_burn()
 
     def _on_use_original_clicked(self) -> None:
+        if self._review_mode == "standalone_edit":
+            srt_path = Path(self.existing_burn_subtitle_edit.text()).expanduser().resolve()
+            content = srt_path.read_text(encoding="utf-8")
+            self._standalone_edit_original_text = content
+            self.translated_srt_editor.setPlainText(content.strip())
+            return
         assert self._current_transcription is not None
         self._start_finalize(self._current_transcription.translated_srt_text)
 

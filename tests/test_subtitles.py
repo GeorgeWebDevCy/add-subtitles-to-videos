@@ -1618,3 +1618,30 @@ def test_standalone_edit_validation_rejects_invalid_srt(monkeypatch, tmp_path) -
     assert srt_path.read_text(encoding="utf-8") == "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
 
     window.close()
+
+def test_standalone_edit_reset_reloads_from_disk(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+
+    original = "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
+    srt_path = tmp_path / "demo.srt"
+    srt_path.write_text(original, encoding="utf-8")
+    video_path = tmp_path / "demo.mp4"
+    video_path.write_bytes(b"video")
+
+    window = main_window_module.MainWindow()
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(srt_path))
+    window._start_existing_srt_edit()
+
+    # Simulate user edits
+    window.translated_srt_editor.setPlainText("1\n00:00:00,000 --> 00:00:01,000\nchanged text")
+
+    window._on_use_original_clicked()
+
+    assert window.translated_srt_editor.toPlainText() == original.strip()
+    assert window._standalone_edit_original_text == original
+    # Still in edit mode
+    assert window._review_mode == "standalone_edit"
+
+    window.close()
