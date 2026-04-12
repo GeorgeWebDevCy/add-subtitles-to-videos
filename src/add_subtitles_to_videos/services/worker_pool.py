@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import torch
+from dataclasses import dataclass
+from pathlib import Path
 
 from .whisper_worker import WhisperWorkerClient
+from ..models import ProcessingOptions
 
 
 class WorkerPool:
@@ -48,3 +51,62 @@ class WorkerPool:
     def close(self) -> None:
         for client, _ in self._slots:
             client.close()
+
+
+@dataclass
+class DispatchJob:
+    file_index: int
+    video_path: Path
+    options: ProcessingOptions
+
+
+class QueueDispatcher:
+    """Pure-Python queue state machine. No Qt dependencies.
+
+    Usage:
+        dispatcher.enqueue(job)
+        result = dispatcher.dispatch_next()  # call after enqueue or after release
+        if result:
+            job, slot_index, client, device = result
+            # start TranscriptionThread(client, device_override=device, ...)
+        # When thread finishes:
+        dispatcher.release(slot_index)
+        dispatcher.dispatch_next()  # pick up next pending job
+    """
+
+    def __init__(self, pool: WorkerPool) -> None:
+        self._pool = pool
+        self._queue: list[DispatchJob] = []
+
+    def enqueue(self, job: DispatchJob) -> None:
+        self._queue.append(job)
+
+    def dispatch_next(self) -> tuple[DispatchJob, int, WhisperWorkerClient, str] | None:
+        """Assign next pending job to a free worker. Returns None if queue empty or all workers busy."""
+        if not self._queue:
+            return None
+        slot = self._pool.acquire()
+        if slot is None:
+            return None
+        slot_index, client, device = slot
+        job = self._queue.pop(0)
+        return job, slot_index, client, device
+
+    def release(self, slot_index: int) -> None:
+        self._pool.release(slot_index)
+
+    def cancel_all(self) -> list[DispatchJob]:
+        jobs = list(self._queue)
+        self._queue.clear()
+        return jobs
+
+    def cancel_job(self, file_index: int) -> bool:
+        for i, job in enumerate(self._queue):
+            if job.file_index == file_index:
+                del self._queue[i]
+                return True
+        return False
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._queue)
