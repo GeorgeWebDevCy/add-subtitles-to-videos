@@ -289,6 +289,7 @@ class MainWindow(QMainWindow):
         self._existing_burn_output_path: Path | None = None
         self._job_started_at: datetime | None = None
         self._stop_requested = False
+        self._queue_paused: bool = False
         self._exit_fullscreen_shortcut: QShortcut | None = None
         self._toggle_fullscreen_shortcut: QShortcut | None = None
         self._sleep_inhibitor = create_sleep_inhibitor()
@@ -336,6 +337,13 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self._content_stack, stretch=1)
 
         self.setCentralWidget(root)
+
+        self._worker_status_labels: dict[int, QLabel] = {}
+        for i in range(_WORKER_POOL.slot_count):
+            label = QLabel(f"{_WORKER_POOL.worker_device_label(i)}: idle")
+            label.setObjectName("workerStatus")
+            self.statusBar().addPermanentWidget(label)
+            self._worker_status_labels[i] = label
 
     def _install_shortcuts(self) -> None:
         self._exit_fullscreen_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Escape), self)
@@ -664,10 +672,28 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self._request_stop)
         self.stop_button.setEnabled(False)
 
+        self._pause_btn = QPushButton("Pause")
+        self._pause_btn.setEnabled(False)
+        self._pause_btn.clicked.connect(self._on_pause_clicked)
+
+        self._skip_btn = QPushButton("Skip File")
+        self._skip_btn.setEnabled(False)
+        self._skip_btn.clicked.connect(self._on_skip_clicked)
+
+        self._stop_all_btn = QPushButton("Stop All")
+        self._stop_all_btn.setEnabled(False)
+        self._stop_all_btn.clicked.connect(self._on_stop_all_clicked)
+
         action_row = QHBoxLayout()
         action_row.addWidget(self.run_button, stretch=1)
         action_row.addWidget(self.stop_button)
         layout.addLayout(action_row)
+
+        queue_row = QHBoxLayout()
+        queue_row.addWidget(self._pause_btn)
+        queue_row.addWidget(self._skip_btn)
+        queue_row.addWidget(self._stop_all_btn)
+        layout.addLayout(queue_row)
         return card
 
     def _create_summary_card(self) -> QWidget:
@@ -939,6 +965,7 @@ class MainWindow(QMainWindow):
                 options=self._current_options,
             ))
         self._dispatch_pending()
+        self._refresh_queue_controls()
 
     def _dispatch_pending(self) -> None:
         """Assign the next queued file to a free worker slot.
@@ -948,6 +975,8 @@ class MainWindow(QMainWindow):
         prefetch so they don't try to replace the current review panel.
         Subsequent jobs in the same call always run as prefetch (parallel workers).
         """
+        if self._queue_paused:
+            return
         if getattr(self, "_stop_requested", False):
             return
         primary_dispatched = False
@@ -967,6 +996,7 @@ class MainWindow(QMainWindow):
                 worker_client=client,
                 worker_device=device,
             )
+        self._refresh_queue_controls()
 
     def _start_transcription(
         self,
@@ -1024,6 +1054,10 @@ class MainWindow(QMainWindow):
         self._active_transcription_index = file_index
         self._active_transcription_is_prefetch = as_prefetch
         thread.start()
+        if worker_slot in self._worker_status_labels:
+            self._worker_status_labels[worker_slot].setText(
+                f"{_WORKER_POOL.worker_device_label(worker_slot)}: transcribing \"{video_path.name}\""
+            )
 
     def _on_file_progress(self, file_index: int, progress: float) -> None:
         self._file_progress[file_index] = progress
@@ -1411,6 +1445,35 @@ class MainWindow(QMainWindow):
 
         self._on_cancelled("Processing stopped by user.")
 
+    def _on_pause_clicked(self) -> None:
+        self._queue_paused = not self._queue_paused
+        self._pause_btn.setText("Resume" if self._queue_paused else "Pause")
+
+    def _on_skip_clicked(self) -> None:
+        # Cancel the GPU worker first (slot index where device label is "GPU")
+        for slot_index, thread in list(self._transcription_threads.items()):
+            if _WORKER_POOL.worker_device_label(slot_index) == "GPU":
+                thread.request_stop()
+                return
+        # Fallback: cancel any active thread
+        for thread in list(self._transcription_threads.values()):
+            thread.request_stop()
+            return
+
+    def _on_stop_all_clicked(self) -> None:
+        _QUEUE_DISPATCHER.cancel_all()
+        for thread in list(self._transcription_threads.values()):
+            thread.request_stop()
+        self._queue_paused = False
+        self._pause_btn.setText("Pause")
+        self._refresh_queue_controls()
+
+    def _refresh_queue_controls(self) -> None:
+        running = bool(self._transcription_threads) or _QUEUE_DISPATCHER.pending_count > 0
+        self._pause_btn.setEnabled(running)
+        self._skip_btn.setEnabled(bool(self._transcription_threads))
+        self._stop_all_btn.setEnabled(running)
+
     def _advance_after_finalize(self) -> None:
         next_index = self._current_file_index
         next_video = self._selected_files[next_index]
@@ -1533,7 +1596,12 @@ class MainWindow(QMainWindow):
             if t is thread:
                 del self._transcription_threads[slot_index]
                 _WORKER_POOL.release(slot_index)
+                if slot_index in self._worker_status_labels:
+                    self._worker_status_labels[slot_index].setText(
+                        f"{_WORKER_POOL.worker_device_label(slot_index)}: idle"
+                    )
                 self._dispatch_pending()
+                self._refresh_queue_controls()
                 thread.deleteLater()
                 return
 
