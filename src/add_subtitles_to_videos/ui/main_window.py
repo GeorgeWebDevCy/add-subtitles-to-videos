@@ -1444,6 +1444,7 @@ class MainWindow(QMainWindow):
             return
 
         self._on_cancelled("Processing stopped by user.")
+        self._refresh_queue_controls()
 
     def _on_pause_clicked(self) -> None:
         self._queue_paused = not self._queue_paused
@@ -2018,7 +2019,7 @@ class MainWindow(QMainWindow):
         running = any(
             thread is not None and thread.isRunning()
             for thread in (self._transcription_thread, self._finalize_thread, self._existing_burn_thread)
-        )
+        ) or bool(self._transcription_threads)
         review_active = self._current_transcription is not None or self._prefetched_transcription is not None
         preload_running = self._preload_thread is not None and self._preload_thread.isRunning()
         if running or review_active:
