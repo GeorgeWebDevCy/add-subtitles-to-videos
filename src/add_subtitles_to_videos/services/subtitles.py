@@ -127,18 +127,26 @@ def validate_review_srt_text(
         return str(exc)
 
     references = list(reference_segments)
-    if len(parsed_segments) != len(references):
-        return (
-            "Translated subtitles must keep the same number of subtitle blocks as the source review transcript."
-        )
+    if not references:
+        return None
 
-    for index, (parsed, reference) in enumerate(zip(parsed_segments, references, strict=True), start=1):
-        if (
-            abs(parsed.start_seconds - reference.start_seconds) > 0.001
-            or abs(parsed.end_seconds - reference.end_seconds) > 0.001
-        ):
+    parsed_index = 0
+    for index, reference in enumerate(references, start=1):
+        found_reference = False
+        while parsed_index < len(parsed_segments):
+            parsed = parsed_segments[parsed_index]
+            parsed_index += 1
+            if (
+                abs(parsed.start_seconds - reference.start_seconds) <= 0.001
+                and abs(parsed.end_seconds - reference.end_seconds) <= 0.001
+            ):
+                found_reference = True
+                break
+
+        if not found_reference:
             return (
-                f"Subtitle block {index} changed timing. Review mode only allows editing translated text."
+                f"Subtitle block {index} is missing or changed timing. "
+                "Keep every original subtitle block and timestamp, but you can insert extra blocks for missed lines."
             )
 
     return None

@@ -289,6 +289,45 @@ class ImmediateFinalizeThread(QThread):
         self.requestInterruption()
 
 
+class ImmediateExistingBurnThread(QThread):
+    progress_changed = Signal(int, str)
+    log_message = Signal(str)
+    completed = Signal(object)
+    cancelled = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, video_path, subtitle_path, output_path, *, font_size) -> None:
+        super().__init__()
+        self._video_path = video_path
+        self._subtitle_path = subtitle_path
+        self._output_path = output_path
+
+    def run(self) -> None:
+        self.completed.emit((self._video_path, self._subtitle_path, self._output_path))
+
+    def request_stop(self) -> None:
+        self.requestInterruption()
+
+
+class CancellableExistingBurnThread(QThread):
+    progress_changed = Signal(int, str)
+    log_message = Signal(str)
+    completed = Signal(object)
+    cancelled = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, video_path, subtitle_path, output_path, *, font_size) -> None:
+        super().__init__()
+
+    def run(self) -> None:
+        while not self.isInterruptionRequested():
+            self.msleep(20)
+        self.cancelled.emit("Processing stopped by user.")
+
+    def request_stop(self) -> None:
+        self.requestInterruption()
+
+
 class RecordingImmediateTranscriptionThread(ImmediateTranscriptionThread):
     started_files: list[str] = []
 
@@ -423,6 +462,20 @@ def test_validate_review_srt_rejects_timing_changes() -> None:
     )
 
     assert "changed timing" in validate_review_srt_text(invalid_srt, reference)
+
+
+def test_validate_review_srt_allows_inserted_missing_blocks() -> None:
+    reference = [
+        TranslationSegment(0.0, 1.0, "Γειά", "hello"),
+        TranslationSegment(1.0, 2.0, "σου", "there"),
+    ]
+    valid_srt = (
+        "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n"
+        "2\n00:00:00,400 --> 00:00:00,800\n[missing line added]\n\n"
+        "3\n00:00:01,000 --> 00:00:02,000\nthere\n"
+    )
+
+    assert validate_review_srt_text(valid_srt, reference) is None
 
 
 def test_translation_segments_to_srt_uses_requested_text_field() -> None:
@@ -1028,6 +1081,24 @@ def test_main_window_blocks_review_when_srt_structure_changes(monkeypatch, tmp_p
     window.close()
 
 
+def test_main_window_can_insert_missing_segment_template(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+
+    window = main_window_module.MainWindow()
+    video_path = tmp_path / "demo.mp4"
+    window._show_review(_transcription_result(video_path), 0)
+
+    window._on_insert_missing_segment_clicked()
+
+    updated_text = window.translated_srt_editor.toPlainText()
+    assert "[Add missing subtitle text here]" in updated_text
+    assert "3\n00:00:02,000 --> 00:00:03,500" in updated_text
+
+    window._on_cancelled("Processing stopped by user.")
+    window.close()
+
+
 def test_main_window_restores_autosaved_review_draft_from_disk(monkeypatch, tmp_path) -> None:
     _application()
     _patch_settings(monkeypatch)
@@ -1130,6 +1201,55 @@ def test_main_window_can_stop_active_processing(monkeypatch, tmp_path) -> None:
     assert not window.stop_button.isEnabled()
     assert _pump_events_until(lambda: window._transcription_thread is None)
 
+    window.close()
+
+
+def test_main_window_can_start_standalone_subtitle_burn(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    monkeypatch.setattr(main_window_module, "ExistingSubtitleBurnThread", ImmediateExistingBurnThread)
+
+    video_path = tmp_path / "burn-demo.mp4"
+    subtitle_path = tmp_path / "burn-demo.en.srt"
+    video_path.write_bytes(b"video")
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+
+    window = main_window_module.MainWindow()
+    window.output_directory_edit.setText(str(tmp_path))
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(subtitle_path))
+
+    window._start_existing_burn()
+
+    assert _pump_events_until(lambda: window.status_label.text() == "Standalone subtitle burn finished.")
+    assert window.queue_value.text() == "Standalone burn finished"
+    assert "burn-demo.subtitled.mp4" in window.summary_label.text()
+    window.close()
+
+
+def test_main_window_can_stop_standalone_subtitle_burn(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    monkeypatch.setattr(main_window_module, "ExistingSubtitleBurnThread", CancellableExistingBurnThread)
+
+    video_path = tmp_path / "burn-demo.mp4"
+    subtitle_path = tmp_path / "burn-demo.en.srt"
+    video_path.write_bytes(b"video")
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+
+    window = main_window_module.MainWindow()
+    window.output_directory_edit.setText(str(tmp_path))
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(subtitle_path))
+
+    window._start_existing_burn()
+    assert _pump_events_until(lambda: window.stop_button.isEnabled())
+
+    window._request_stop()
+
+    assert _pump_events_until(lambda: window.status_label.text() == "Standalone subtitle burn stopped.")
+    assert window.queue_value.text() == "Standalone burn stopped"
+    assert _pump_events_until(lambda: window._existing_burn_thread is None)
     window.close()
 
 

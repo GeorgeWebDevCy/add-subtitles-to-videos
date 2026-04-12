@@ -53,10 +53,10 @@ from ..config import (
 )
 from ..languages import language_label
 from ..models import OutputMode, PipelineResult, ProcessingOptions, SubtitleSegment, TranscriptionResult
-from ..services import OperationCancelledError
+from ..services import OperationCancelledError, ffmpeg
 from ..services.gpu import current_gpu_snapshot
 from ..services.pipeline import SubtitlePipeline
-from ..services.subtitles import validate_review_srt_text
+from ..services.subtitles import format_srt_timestamp, parse_srt_text, validate_review_srt_text
 from ..services.translation import (
     OpenAICompatibleTranslationService,
     TranslationProviderConfig,
@@ -190,6 +190,52 @@ class ModelPreloadThread(QThread):
             self.failed.emit(str(exc))
 
 
+class ExistingSubtitleBurnThread(QThread):
+    progress_changed = Signal(int, str)
+    log_message = Signal(str)
+    completed = Signal(object)
+    cancelled = Signal(str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        video_path: Path,
+        subtitle_path: Path,
+        output_path: Path,
+        *,
+        font_size: int,
+    ) -> None:
+        super().__init__()
+        self._video_path = video_path
+        self._subtitle_path = subtitle_path
+        self._output_path = output_path
+        self._font_size = font_size
+
+    def run(self) -> None:
+        try:
+            self.progress_changed.emit(5, f"Burning {self._subtitle_path.name} into {self._video_path.name}")
+            self.log_message.emit(
+                f"Burning existing subtitle file {self._subtitle_path.name} into {self._video_path.name}"
+            )
+            ffmpeg.burn_subtitles(
+                self._video_path,
+                self._subtitle_path,
+                self._output_path,
+                font_size=self._font_size,
+                cancel_requested=self.isInterruptionRequested,
+            )
+            self.progress_changed.emit(100, f"Wrote subtitled video to {self._output_path.name}")
+            self.log_message.emit(f"Wrote subtitled video to {self._output_path}")
+            self.completed.emit((self._video_path, self._subtitle_path, self._output_path))
+        except OperationCancelledError as exc:
+            self.cancelled.emit(str(exc))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+    def request_stop(self) -> None:
+        self.requestInterruption()
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -202,6 +248,7 @@ class MainWindow(QMainWindow):
         self._current_transcription: TranscriptionResult | None = None
         self._transcription_thread: TranscriptionThread | None = None
         self._finalize_thread: FinalizeThread | None = None
+        self._existing_burn_thread: ExistingSubtitleBurnThread | None = None
         self._preload_thread: ModelPreloadThread | None = None
         self._preloaded_model_name: str | None = None
         self._prefetched_transcription: TranscriptionResult | None = None
@@ -212,6 +259,9 @@ class MainWindow(QMainWindow):
         self._active_transcription_is_prefetch = False
         self._current_review_draft_path: Path | None = None
         self._last_autosaved_review_text: str | None = None
+        self._existing_burn_video_path: Path | None = None
+        self._existing_burn_subtitle_path: Path | None = None
+        self._existing_burn_output_path: Path | None = None
         self._job_started_at: datetime | None = None
         self._stop_requested = False
         self._exit_fullscreen_shortcut: QShortcut | None = None
@@ -497,6 +547,44 @@ class MainWindow(QMainWindow):
         row.addWidget(self.browse_output_button)
 
         layout.addLayout(row)
+
+        burn_title = QLabel("Burn Existing SRT Later")
+        burn_title.setObjectName("miniTitle")
+        layout.addWidget(burn_title)
+
+        burn_hint = QLabel(
+            "If you generated SRT-only output, pick a video and an existing .srt here to create a burned-in video without re-running Whisper."
+        )
+        burn_hint.setObjectName("supportingText")
+        burn_hint.setWordWrap(True)
+        layout.addWidget(burn_hint)
+
+        burn_video_row = QHBoxLayout()
+        self.existing_burn_video_edit = QLineEdit()
+        self.existing_burn_video_edit.setPlaceholderText("Choose a source video for a standalone burn")
+        burn_video_row.addWidget(self.existing_burn_video_edit, stretch=1)
+
+        self.browse_existing_burn_video_button = QPushButton("Video")
+        self.browse_existing_burn_video_button.setObjectName("secondaryButton")
+        self.browse_existing_burn_video_button.clicked.connect(self._choose_existing_burn_video)
+        burn_video_row.addWidget(self.browse_existing_burn_video_button)
+        layout.addLayout(burn_video_row)
+
+        burn_subtitle_row = QHBoxLayout()
+        self.existing_burn_subtitle_edit = QLineEdit()
+        self.existing_burn_subtitle_edit.setPlaceholderText("Choose an .srt file to burn into the selected video")
+        burn_subtitle_row.addWidget(self.existing_burn_subtitle_edit, stretch=1)
+
+        self.browse_existing_burn_subtitle_button = QPushButton("SRT")
+        self.browse_existing_burn_subtitle_button.setObjectName("secondaryButton")
+        self.browse_existing_burn_subtitle_button.clicked.connect(self._choose_existing_burn_subtitle)
+        burn_subtitle_row.addWidget(self.browse_existing_burn_subtitle_button)
+        layout.addLayout(burn_subtitle_row)
+
+        self.burn_existing_button = QPushButton("Burn Existing SRT")
+        self.burn_existing_button.setObjectName("secondaryButton")
+        self.burn_existing_button.clicked.connect(self._start_existing_burn)
+        layout.addWidget(self.burn_existing_button)
         return card
 
     def _create_run_card(self) -> QWidget:
@@ -649,7 +737,7 @@ class MainWindow(QMainWindow):
         self.translated_srt_editor = QPlainTextEdit()
         self.translated_srt_editor.setObjectName("translatedTranscriptPanel")
         self.translated_srt_editor.setPlaceholderText(
-            "Translated SRT text will appear here. You can edit wording, but timing must stay unchanged."
+            "Translated SRT text will appear here. Keep the original timed blocks, but you can add extra SRT blocks for missed subtitles."
         )
         self.translated_srt_editor.textChanged.connect(self._schedule_review_draft_autosave)
         translated_layout.addWidget(self.translated_srt_editor, stretch=1)
@@ -664,7 +752,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(transcript_splitter, stretch=1)
 
         self.review_warning_label = QLabel(
-            "Translated subtitles must keep the same number of subtitle blocks and timestamps as the source transcript."
+            "Keep every original subtitle block and timestamp, but you can insert extra blocks for missed subtitles."
         )
         self.review_warning_label.setObjectName("warningText")
         self.review_warning_label.setVisible(False)
@@ -672,6 +760,10 @@ class MainWindow(QMainWindow):
 
         button_row = QHBoxLayout()
         button_row.addStretch(1)
+
+        self.insert_missing_segment_button = QPushButton("Insert Missing Segment")
+        self.insert_missing_segment_button.setObjectName("secondaryButton")
+        self.insert_missing_segment_button.clicked.connect(self._on_insert_missing_segment_clicked)
 
         self.use_original_button = QPushButton("Use Original Draft")
         self.use_original_button.setObjectName("secondaryButton")
@@ -681,6 +773,7 @@ class MainWindow(QMainWindow):
         self.approve_button.setObjectName("runButton")
         self.approve_button.clicked.connect(self._on_approve_clicked)
 
+        button_row.addWidget(self.insert_missing_segment_button)
         button_row.addWidget(self.use_original_button)
         button_row.addWidget(self.approve_button)
         layout.addLayout(button_row)
@@ -728,10 +821,33 @@ class MainWindow(QMainWindow):
         if chosen_directory:
             self.output_directory_edit.setText(chosen_directory)
 
+    def _choose_existing_burn_video(self) -> None:
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose a video for standalone subtitle burn",
+            self.existing_burn_video_edit.text() or str(Path.cwd()),
+            VIDEO_FILE_FILTER,
+        )
+        if selected_file:
+            self.existing_burn_video_edit.setText(selected_file)
+
+    def _choose_existing_burn_subtitle(self) -> None:
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose an SRT file for standalone subtitle burn",
+            self.existing_burn_subtitle_edit.text() or str(Path.cwd()),
+            "Subtitle Files (*.srt)",
+        )
+        if selected_file:
+            self.existing_burn_subtitle_edit.setText(selected_file)
+
     def _start_processing(self) -> None:
         transcribing = self._transcription_thread is not None and self._transcription_thread.isRunning()
         finalizing = self._finalize_thread is not None and self._finalize_thread.isRunning()
-        if transcribing or finalizing:
+        existing_burn_running = (
+            self._existing_burn_thread is not None and self._existing_burn_thread.isRunning()
+        )
+        if transcribing or finalizing or existing_burn_running:
             return
 
         if not self._selected_files:
@@ -867,6 +983,15 @@ class MainWindow(QMainWindow):
         self._refresh_review_queue_label()
         self._maybe_start_prefetch()
 
+    def _on_insert_missing_segment_clicked(self) -> None:
+        template = self._missing_segment_template()
+        if self.translated_srt_editor.toPlainText().strip():
+            self.translated_srt_editor.appendPlainText("")
+            self.translated_srt_editor.appendPlainText(template)
+        else:
+            self.translated_srt_editor.setPlainText(template + "\n")
+        self.translated_srt_editor.setFocus()
+
     def _on_approve_clicked(self) -> None:
         assert self._current_transcription is not None
         srt_text = self.translated_srt_editor.toPlainText().strip()
@@ -886,6 +1011,133 @@ class MainWindow(QMainWindow):
     def _on_use_original_clicked(self) -> None:
         assert self._current_transcription is not None
         self._start_finalize(self._current_transcription.translated_srt_text)
+
+    def _start_existing_burn(self) -> None:
+        running = any(
+            thread is not None and thread.isRunning()
+            for thread in (self._transcription_thread, self._finalize_thread, self._existing_burn_thread)
+        )
+        review_active = self._current_transcription is not None or self._prefetched_transcription is not None
+        if running or review_active:
+            QMessageBox.warning(
+                self,
+                APP_NAME,
+                "Finish or stop the current subtitle job before starting a standalone subtitle burn.",
+            )
+            return
+
+        video_text = self.existing_burn_video_edit.text().strip()
+        subtitle_text = self.existing_burn_subtitle_edit.text().strip()
+        output_directory_text = self.output_directory_edit.text().strip()
+        if not video_text:
+            QMessageBox.warning(self, APP_NAME, "Choose a video for the standalone subtitle burn.")
+            return
+        if not subtitle_text:
+            QMessageBox.warning(self, APP_NAME, "Choose an SRT file for the standalone subtitle burn.")
+            return
+        if not output_directory_text:
+            QMessageBox.warning(self, APP_NAME, "Choose an output directory first.")
+            return
+
+        video_path = Path(video_text).expanduser().resolve()
+        subtitle_path = Path(subtitle_text).expanduser().resolve()
+        if not video_path.exists():
+            QMessageBox.warning(self, APP_NAME, "The selected burn video does not exist.")
+            return
+        if not subtitle_path.exists():
+            QMessageBox.warning(self, APP_NAME, "The selected SRT file does not exist.")
+            return
+        if subtitle_path.suffix.casefold() != ".srt":
+            QMessageBox.warning(self, APP_NAME, "Choose an SRT file with the .srt extension.")
+            return
+
+        output_directory = Path(output_directory_text).expanduser().resolve()
+        output_path = output_directory / f"{video_path.stem}.subtitled{video_path.suffix}"
+
+        thread = ExistingSubtitleBurnThread(
+            video_path,
+            subtitle_path,
+            output_path,
+            font_size=self.subtitle_font_size_spinbox.value(),
+        )
+        thread.progress_changed.connect(self._on_progress)
+        thread.log_message.connect(self._append_log)
+        thread.completed.connect(self._on_existing_burn_completed)
+        thread.cancelled.connect(self._on_cancelled)
+        thread.failed.connect(self._on_failed)
+        thread.finished.connect(lambda t=thread: self._on_thread_finished(t))
+        self._existing_burn_thread = thread
+        self._existing_burn_video_path = video_path
+        self._existing_burn_subtitle_path = subtitle_path
+        self._existing_burn_output_path = output_path
+
+        self.progress_bar.setValue(0)
+        self.status_label.setText(f"Preparing standalone subtitle burn for {video_path.name}...")
+        self.active_file_value.setText(video_path.name)
+        self.queue_value.setText("Standalone burn")
+        self._job_started_at = datetime.now()
+        self._elapsed_timer.start()
+        self._update_elapsed_label()
+        self._set_sleep_inhibition(True)
+        self._set_busy(True)
+        self.stop_button.setEnabled(True)
+        self._append_log(
+            f"Starting standalone subtitle burn for {video_path.name} with {subtitle_path.name}."
+        )
+        thread.start()
+
+    def _on_existing_burn_completed(self, payload: object) -> None:
+        video_path, subtitle_path, output_path = payload
+        self._set_busy(False)
+        self._elapsed_timer.stop()
+        self._job_started_at = None
+        self._stop_requested = False
+        self.stop_button.setEnabled(False)
+        self._set_sleep_inhibition(False)
+        self.status_label.setText("Standalone subtitle burn finished.")
+        self.active_file_value.setText(Path(video_path).name)
+        self.queue_value.setText("Standalone burn finished")
+        self.progress_bar.setValue(100)
+        self.summary_label.setText(
+            f"Standalone burn finished: {Path(video_path).name}\n"
+            f"Subtitle file: {subtitle_path}\n"
+            f"Burned video: {output_path}"
+        )
+        self.review_flags_label.setText(
+            "Standalone subtitle burn completed. The generated video now includes the selected SRT."
+        )
+        self._append_log(f"Standalone subtitle burn completed: {output_path}")
+        self._clear_existing_burn_state()
+
+    def _clear_existing_burn_state(self) -> None:
+        self._existing_burn_video_path = None
+        self._existing_burn_subtitle_path = None
+        self._existing_burn_output_path = None
+
+    def _missing_segment_template(self) -> str:
+        next_index = 1
+        start_seconds = 0.0
+        end_seconds = 1.5
+        current_text = self.translated_srt_editor.toPlainText().strip()
+        if current_text:
+            try:
+                parsed_segments = parse_srt_text(current_text)
+            except ValueError:
+                parsed_segments = []
+            if parsed_segments:
+                next_index = len(parsed_segments) + 1
+                start_seconds = parsed_segments[-1].end_seconds
+                end_seconds = start_seconds + 1.5
+        elif self._current_transcription is not None and self._current_transcription.review_segments:
+            next_index = len(self._current_transcription.review_segments) + 1
+            start_seconds = self._current_transcription.review_segments[-1].end_seconds
+            end_seconds = start_seconds + 1.5
+
+        return (
+            f"{next_index}\n"
+            f"{format_srt_timestamp(start_seconds)} --> {format_srt_timestamp(end_seconds)}\n"
+            "[Add missing subtitle text here]"
+        )
 
     def _start_finalize(self, srt_text: str) -> None:
         assert self._current_options is not None
@@ -963,6 +1215,7 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
 
     def _on_failed(self, error_message: str) -> None:
+        standalone_burn_active = self._existing_burn_output_path is not None
         self._flush_review_draft(force=True)
         self._set_busy(False)
         self._elapsed_timer.stop()
@@ -976,14 +1229,24 @@ class MainWindow(QMainWindow):
         self._clear_prefetch_state()
         self._set_sleep_inhibition(False)
         self._content_stack.setCurrentIndex(0)
-        self.status_label.setText("The subtitle pipeline hit an error.")
+        if standalone_burn_active:
+            self.status_label.setText("The standalone subtitle burn hit an error.")
+            self.active_file_value.setText("Standalone burn failed")
+            self.queue_value.setText("Standalone burn failed")
+            self.review_flags_label.setText(
+                "Standalone subtitle burn stopped with an error. Check the session log for the exact FFmpeg failure."
+            )
+            self._clear_existing_burn_state()
+        else:
+            self.status_label.setText("The subtitle pipeline hit an error.")
+            self.review_flags_label.setText(
+                "Processing stopped with an error. Check the session log for the exact FFmpeg, Whisper, or translation failure."
+            )
         self._append_log(error_message)
-        self.review_flags_label.setText(
-            "Processing stopped with an error. Check the session log for the exact FFmpeg, Whisper, or translation failure."
-        )
         QMessageBox.critical(self, APP_NAME, error_message)
 
     def _on_cancelled(self, message: str) -> None:
+        standalone_burn_active = self._existing_burn_output_path is not None
         self._flush_review_draft(force=True)
         self._set_busy(False)
         self._elapsed_timer.stop()
@@ -997,18 +1260,24 @@ class MainWindow(QMainWindow):
         self._clear_prefetch_state()
         self._set_sleep_inhibition(False)
         self._content_stack.setCurrentIndex(0)
-        self.status_label.setText("Processing stopped.")
-        self.active_file_value.setText("Stopped")
-        self.queue_value.setText(
-            f"Stopped after {len(self._all_results)} of {len(self._selected_files)} finished"
-        )
+        if standalone_burn_active:
+            self.status_label.setText("Standalone subtitle burn stopped.")
+            self.active_file_value.setText("Stopped")
+            self.queue_value.setText("Standalone burn stopped")
+            self._clear_existing_burn_state()
+        else:
+            self.status_label.setText("Processing stopped.")
+            self.active_file_value.setText("Stopped")
+            self.queue_value.setText(
+                f"Stopped after {len(self._all_results)} of {len(self._selected_files)} finished"
+            )
         self.review_flags_label.setText(message)
         self._append_log(message)
 
     def _request_stop(self) -> None:
         active_threads = [
             thread
-            for thread in (self._transcription_thread, self._finalize_thread)
+            for thread in (self._transcription_thread, self._finalize_thread, self._existing_burn_thread)
             if thread is not None and thread.isRunning()
         ]
         if (not active_threads and self._current_transcription is None) or self._stop_requested:
@@ -1023,6 +1292,10 @@ class MainWindow(QMainWindow):
 
         if self._finalize_thread is not None and self._finalize_thread.isRunning():
             self.status_label.setText("Stop requested. Cancelling the current export...")
+            return
+
+        if self._existing_burn_thread is not None and self._existing_burn_thread.isRunning():
+            self.status_label.setText("Stop requested. Cancelling the standalone subtitle burn...")
             return
 
         if self._transcription_thread is not None and self._transcription_thread.isRunning():
@@ -1138,6 +1411,8 @@ class MainWindow(QMainWindow):
             self._active_transcription_is_prefetch = False
         elif self._finalize_thread is thread:
             self._finalize_thread = None
+        elif self._existing_burn_thread is thread:
+            self._existing_burn_thread = None
         elif self._preload_thread is thread:
             self._preload_thread = None
 
@@ -1214,6 +1489,7 @@ class MainWindow(QMainWindow):
             f"Translation provider: {metadata.translation_provider or 'Not used'}",
             f"Segments: {len(result.review_segments)}",
             f"Model / engine: {self.whisper_model_combo.currentData()} on {metadata.device_label or 'unknown'}",
+            "Review note: keep the original timed blocks, but you can insert extra SRT blocks for missed subtitles.",
         ]
         if metadata.stage_durations:
             stage_order = ("audio_extraction_seconds", "whisper_seconds", "translation_seconds")
@@ -1236,6 +1512,11 @@ class MainWindow(QMainWindow):
             self.add_videos_button,
             self.clear_videos_button,
             self.browse_output_button,
+            self.existing_burn_video_edit,
+            self.browse_existing_burn_video_button,
+            self.existing_burn_subtitle_edit,
+            self.browse_existing_burn_subtitle_button,
+            self.burn_existing_button,
             self.run_button,
             self.source_language_combo,
             self.target_language_combo,
@@ -1250,6 +1531,7 @@ class MainWindow(QMainWindow):
             self.translation_api_key_edit,
             self.save_translation_settings_button,
             self.test_translation_button,
+            self.insert_missing_segment_button,
         ]
         for control in controls:
             control.setEnabled(not busy)
@@ -1426,7 +1708,7 @@ class MainWindow(QMainWindow):
     def _can_preload_selected_model(self) -> bool:
         return not any(
             thread is not None and thread.isRunning()
-            for thread in (self._transcription_thread, self._finalize_thread)
+            for thread in (self._transcription_thread, self._finalize_thread, self._existing_burn_thread)
         ) and self._current_transcription is None and self._prefetched_transcription is None
 
     def _schedule_model_preload(self) -> None:
@@ -1546,7 +1828,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:
         running = any(
             thread is not None and thread.isRunning()
-            for thread in (self._transcription_thread, self._finalize_thread)
+            for thread in (self._transcription_thread, self._finalize_thread, self._existing_burn_thread)
         )
         review_active = self._current_transcription is not None or self._prefetched_transcription is not None
         preload_running = self._preload_thread is not None and self._preload_thread.isRunning()
@@ -1554,7 +1836,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 APP_NAME,
-                "Subtitle generation or review is still active. Use Stop to cancel the current queue before closing the app.",
+                "Subtitle generation, standalone burning, or review is still active. Use Stop before closing the app.",
             )
             event.ignore()
             return
@@ -1567,7 +1849,12 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
-        for thread in (self._transcription_thread, self._finalize_thread, self._preload_thread):
+        for thread in (
+            self._transcription_thread,
+            self._finalize_thread,
+            self._existing_burn_thread,
+            self._preload_thread,
+        ):
             if thread is not None:
                 thread.wait(1000)
         self._gpu_poll_timer.stop()
