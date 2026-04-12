@@ -25,6 +25,9 @@ class ProcessingOptions:
     max_line_length: int
     subtitle_font_size: int
     workflow_profile: WorkflowProfile = WorkflowProfile.EUROPE_MULTILINGUAL
+    word_timestamps: bool = False
+    vad_threshold: float = 0.5
+    vad_min_silence_ms: int = 2000
 
 
 @dataclass(slots=True)
