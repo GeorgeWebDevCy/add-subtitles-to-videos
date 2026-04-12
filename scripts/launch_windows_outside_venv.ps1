@@ -67,16 +67,20 @@ function Ensure-ExternalAppInstall {
 
 $pythonRoot = Ensure-ExternalPythonRoot
 $pythonExe = Join-Path $pythonRoot "python.exe"
-$launcherExe = Join-Path $pythonRoot "Scripts\add-subtitles-to-videos.exe"
+$pythonwExe = Join-Path $pythonRoot "pythonw.exe"
 
 if (-not (Test-Path $pythonExe)) {
     throw "Couldn't find python.exe under the external runtime: $pythonRoot"
 }
 
-Ensure-ExternalAppInstall -PythonExe $pythonExe
-
-if (-not (Test-Path $launcherExe)) {
-    throw "Couldn't find the installed Subtitle Foundry launcher at $launcherExe"
+if (-not (Test-Path $pythonwExe)) {
+    throw "Couldn't find pythonw.exe under the external runtime: $pythonRoot"
 }
 
-Start-Process -FilePath $launcherExe -WorkingDirectory $repoRoot
+Ensure-ExternalAppInstall -PythonExe $pythonExe
+
+if (-not $env:HF_HUB_DISABLE_SYMLINKS_WARNING) {
+    $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
+}
+
+Start-Process -FilePath $pythonwExe -ArgumentList "-m", "add_subtitles_to_videos" -WorkingDirectory $repoRoot

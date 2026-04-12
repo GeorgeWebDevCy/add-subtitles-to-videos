@@ -64,6 +64,7 @@ If the source and target languages match, the app can run transcription-only wit
 ## Notes
 
 - The first run downloads the selected Whisper model, so it can take a while.
+- If you want higher Hugging Face download rate limits for that first model fetch, optionally set `HF_TOKEN` before launching the app.
 - `large-v3` is the default because accuracy matters more than speed for subtitle review, and it now runs through `faster-whisper` by default on CPU and CUDA systems.
 - Whisper is used only for transcription and language detection. Many-to-many translation is handled by the configured text provider.
 - On Windows x64, the project is pinned to the official CUDA 12.4 PyTorch wheel so NVIDIA GPUs can be used automatically when available.
