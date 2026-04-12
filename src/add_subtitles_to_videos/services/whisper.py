@@ -69,12 +69,16 @@ class WhisperService:
                 progress_callback=progress_callback,
             )
         else:
+            if progress_callback is not None:
+                progress_callback(0.0)
             items, metadata = self._transcribe_with_openai_whisper(
                 model,
                 audio_path,
                 source_language=source_language,
                 cancel_requested=cancel_requested,
             )
+            if progress_callback is not None:
+                progress_callback(1.0)
         self._check_cancel(cancel_requested)
         self._emit_gpu_snapshot(log, "CUDA after inference")
 

@@ -1042,6 +1042,9 @@ class MainWindow(QMainWindow):
             self.video_list.addItem(item)
 
     def _on_transcription_completed(self, result: TranscriptionResult, file_index: int) -> None:
+        self._file_status[file_index] = "Awaiting Review"
+        self._file_progress[file_index] = 1.0
+        self._refresh_file_list()
         self._waiting_for_prefetched_review = False
         self._show_review(result, file_index)
 
@@ -1281,6 +1284,9 @@ class MainWindow(QMainWindow):
         result.stage_durations["review_wait_seconds"] = review_wait_seconds
         self._delete_review_draft(result.input_video, result.target_language)
         self._clear_active_review_draft_state()
+        self._file_status[self._current_file_index] = "Done"
+        self._file_progress[self._current_file_index] = 1.0
+        self._refresh_file_list()
         self._all_results.append(result)
         self._refresh_summary(result)
         self._current_file_index += 1
