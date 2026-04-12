@@ -3,10 +3,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 import wave
 
 import numpy as np
 import torch
+try:
+    from faster_whisper import WhisperModel as FasterWhisperModel
+except ImportError:  # pragma: no cover - dependency is installed in normal app environments
+    FasterWhisperModel = None
 import whisper
 
 from . import OperationCancelledError
@@ -18,7 +23,7 @@ CancelChecker = Callable[[], bool]
 
 
 class WhisperService:
-    _GLOBAL_MODEL_CACHE: dict[tuple[str, str], whisper.model.Whisper] = {}
+    _GLOBAL_MODEL_CACHE: dict[tuple[str, str, str], Any] = {}
 
     def __init__(self) -> None:
         self._model_cache = self._GLOBAL_MODEL_CACHE
@@ -37,13 +42,13 @@ class WhisperService:
         if options.source_language and options.source_language != "auto":
             source_language = options.source_language
         device = self._preferred_device()
-        fp16_enabled = device == "cuda"
+        backend = self._backend_name(device)
 
-        cache_key = (options.whisper_model, device)
+        cache_key = (options.whisper_model, device, backend)
         load_message = "Reusing" if cache_key in self._model_cache else "Loading"
         self._emit_log(
             log,
-            f"{load_message} Whisper model '{options.whisper_model}' on {self._device_label(device)}",
+            f"{load_message} Whisper model '{options.whisper_model}' on {self._device_label(device)} via {backend}",
         )
         self._emit_gpu_snapshot(log, "CUDA before model load")
         self._emit_log(log, "Whisper task: transcribe")
@@ -51,41 +56,25 @@ class WhisperService:
         model = self._get_model(options.whisper_model, device)
         self._emit_gpu_snapshot(log, "CUDA after model load")
         self._check_cancel(cancel_requested)
-        audio = self._read_pcm_wave(audio_path)
-        self._check_cancel(cancel_requested)
         self._emit_gpu_snapshot(log, "CUDA before inference")
-        with torch.inference_mode():
-            result = model.transcribe(
-                audio,
-                language=source_language,
-                task="transcribe",
-                fp16=fp16_enabled,
-                verbose=None,
-                condition_on_previous_text=False,
+        if backend == "faster-whisper":
+            items, metadata = self._transcribe_with_faster_whisper(
+                model,
+                audio_path,
+                source_language=source_language,
+            )
+        else:
+            items, metadata = self._transcribe_with_openai_whisper(
+                model,
+                audio_path,
+                source_language=source_language,
+                cancel_requested=cancel_requested,
             )
         self._check_cancel(cancel_requested)
         self._emit_gpu_snapshot(log, "CUDA after inference")
 
-        items: list[SubtitleSegment] = []
-        for segment in result.get("segments", []):
-            text = str(segment.get("text", "")).strip()
-            if not text:
-                continue
-            items.append(
-                SubtitleSegment(
-                    start_seconds=float(segment["start"]),
-                    end_seconds=float(segment["end"]),
-                    text=text,
-                )
-            )
-
-        metadata = TranscriptionMetadata(
-            detected_language=result.get("language"),
-            detected_language_probability=None,
-            duration_seconds=len(audio) / 16000 if len(audio) else None,
-            device_label=self._device_label(device),
-            task_label="transcribe",
-        )
+        metadata.device_label = self._device_label(device)
+        metadata.task_label = "transcribe"
 
         if metadata.detected_language:
             self._emit_log(log, f"Detected language: {metadata.detected_language}")
@@ -95,20 +84,46 @@ class WhisperService:
 
     def preload_model(self, model_name: str, *, log: LogReporter | None = None) -> None:
         device = self._preferred_device()
-        cache_key = (model_name, device)
+        backend = self._backend_name(device)
+        cache_key = (model_name, device, backend)
         load_message = "Reusing" if cache_key in self._model_cache else "Loading"
         self._emit_log(
             log,
-            f"{load_message} Whisper model '{model_name}' on {self._device_label(device)}",
+            f"{load_message} Whisper model '{model_name}' on {self._device_label(device)} via {backend}",
         )
         self._get_model(model_name, device)
         self._emit_gpu_snapshot(log, "CUDA after warmup")
 
-    def _get_model(self, model_name: str, device: str) -> whisper.model.Whisper:
-        cache_key = (model_name, device)
+    def _get_model(self, model_name: str, device: str) -> Any:
+        backend = self._backend_name(device)
+        cache_key = (model_name, device, backend)
         if cache_key not in self._model_cache:
-            self._model_cache[cache_key] = whisper.load_model(model_name, device=device)
+            self._model_cache[cache_key] = self._load_backend_model(model_name, device, backend)
         return self._model_cache[cache_key]
+
+    @staticmethod
+    def _load_backend_model(model_name: str, device: str, backend: str) -> Any:
+        if backend == "faster-whisper":
+            if FasterWhisperModel is None:
+                raise RuntimeError("faster-whisper is not installed.")
+            return FasterWhisperModel(
+                model_name,
+                device=device,
+                compute_type=WhisperService._compute_type(device),
+            )
+        return whisper.load_model(model_name, device=device)
+
+    @staticmethod
+    def _backend_name(device: str) -> str:
+        if device != "mps" and FasterWhisperModel is not None:
+            return "faster-whisper"
+        return "openai-whisper"
+
+    @staticmethod
+    def _compute_type(device: str) -> str:
+        if device == "cuda":
+            return "float16"
+        return "float32"
 
     @staticmethod
     def _preferred_device() -> str:
@@ -128,6 +143,80 @@ class WhisperService:
         if device == "mps":
             return "Apple Metal"
         return "CPU"
+
+    def _transcribe_with_faster_whisper(
+        self,
+        model: Any,
+        audio_path: Path,
+        *,
+        source_language: str | None,
+    ) -> tuple[list[SubtitleSegment], TranscriptionMetadata]:
+        segments, info = model.transcribe(
+            str(audio_path),
+            language=source_language,
+            task="transcribe",
+            condition_on_previous_text=False,
+        )
+
+        items: list[SubtitleSegment] = []
+        for segment in segments:
+            text = str(getattr(segment, "text", "")).strip()
+            if not text:
+                continue
+            items.append(
+                SubtitleSegment(
+                    start_seconds=float(getattr(segment, "start")),
+                    end_seconds=float(getattr(segment, "end")),
+                    text=text,
+                )
+            )
+
+        metadata = TranscriptionMetadata(
+            detected_language=getattr(info, "language", None),
+            detected_language_probability=getattr(info, "language_probability", None),
+            duration_seconds=getattr(info, "duration", None),
+        )
+        return items, metadata
+
+    def _transcribe_with_openai_whisper(
+        self,
+        model: Any,
+        audio_path: Path,
+        *,
+        source_language: str | None,
+        cancel_requested: CancelChecker | None,
+    ) -> tuple[list[SubtitleSegment], TranscriptionMetadata]:
+        audio = self._read_pcm_wave(audio_path)
+        self._check_cancel(cancel_requested)
+        with torch.inference_mode():
+            result = model.transcribe(
+                audio,
+                language=source_language,
+                task="transcribe",
+                fp16=self._preferred_device() == "cuda",
+                verbose=None,
+                condition_on_previous_text=False,
+            )
+
+        items: list[SubtitleSegment] = []
+        for segment in result.get("segments", []):
+            text = str(segment.get("text", "")).strip()
+            if not text:
+                continue
+            items.append(
+                SubtitleSegment(
+                    start_seconds=float(segment["start"]),
+                    end_seconds=float(segment["end"]),
+                    text=text,
+                )
+            )
+
+        metadata = TranscriptionMetadata(
+            detected_language=result.get("language"),
+            detected_language_probability=None,
+            duration_seconds=len(audio) / 16000 if len(audio) else None,
+        )
+        return items, metadata
 
     @staticmethod
     def _read_pcm_wave(audio_path: Path) -> np.ndarray:

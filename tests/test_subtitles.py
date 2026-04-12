@@ -782,19 +782,24 @@ def test_pipeline_logs_stage_timings_for_transcribe_and_finalize(tmp_path) -> No
     assert any("Finalize completed in" in message for message in logs)
 
 
-def test_whisper_service_disables_console_progress_in_windowed_apps(tmp_path) -> None:
+def test_whisper_service_uses_faster_whisper_defaults(tmp_path) -> None:
     captured: dict[str, object] = {}
 
     class FakeModel:
-        def transcribe(self, audio, **kwargs):
+        def transcribe(self, audio_path, **kwargs):
+            captured["audio_path"] = audio_path
             captured.update(kwargs)
-            return {
-                "language": "el",
-                "segments": [{"start": 0.0, "end": 1.0, "text": "Hello"}],
-            }
+            segment = type("Segment", (), {"start": 0.0, "end": 1.0, "text": "Hello"})()
+            info = type(
+                "Info",
+                (),
+                {"language": "el", "language_probability": 0.99, "duration": 1.0},
+            )()
+            return iter([segment]), info
 
     service = WhisperService()
     service._get_model = lambda model_name, device: FakeModel()  # type: ignore[method-assign]
+    service._backend_name = lambda device: "faster-whisper"  # type: ignore[method-assign]
     service._preferred_device = lambda: "cpu"  # type: ignore[method-assign]
 
     audio_path = tmp_path / "audio.wav"
@@ -808,21 +813,21 @@ def test_whisper_service_disables_console_progress_in_windowed_apps(tmp_path) ->
 
     service.transcribe(audio_path, _options(tmp_path, source_language="el", target_language="en"))
 
-    assert captured["verbose"] is None
+    assert Path(str(captured["audio_path"])) == audio_path
+    assert captured["language"] == "el"
+    assert captured["task"] == "transcribe"
+    assert captured["condition_on_previous_text"] is False
 
 
 def test_whisper_service_reuses_loaded_models_across_instances(monkeypatch) -> None:
-    loaded_models: list[tuple[str, str]] = []
+    loaded_models: list[tuple[str, str, str]] = []
     monkeypatch.setattr(WhisperService, "_GLOBAL_MODEL_CACHE", {}, raising=False)
 
-    def fake_load_model(model_name: str, *, device: str):
-        loaded_models.append((model_name, device))
+    def fake_load_backend_model(model_name: str, device: str, backend: str):
+        loaded_models.append((model_name, device, backend))
         return object()
 
-    with patch(
-        "add_subtitles_to_videos.services.whisper.whisper.load_model",
-        side_effect=fake_load_model,
-    ):
+    with patch.object(WhisperService, "_load_backend_model", side_effect=fake_load_backend_model):
         first_service = WhisperService()
         second_service = WhisperService()
 
@@ -830,28 +835,25 @@ def test_whisper_service_reuses_loaded_models_across_instances(monkeypatch) -> N
         second_model = second_service._get_model("medium", "cpu")
 
     assert first_model is second_model
-    assert loaded_models == [("medium", "cpu")]
+    assert loaded_models == [("medium", "cpu", "faster-whisper")]
 
 
 def test_whisper_service_preload_model_warms_cache(monkeypatch) -> None:
-    loaded_models: list[tuple[str, str]] = []
+    loaded_models: list[tuple[str, str, str]] = []
     monkeypatch.setattr(WhisperService, "_GLOBAL_MODEL_CACHE", {}, raising=False)
 
-    def fake_load_model(model_name: str, *, device: str):
-        loaded_models.append((model_name, device))
+    def fake_load_backend_model(model_name: str, device: str, backend: str):
+        loaded_models.append((model_name, device, backend))
         return object()
 
-    with patch(
-        "add_subtitles_to_videos.services.whisper.whisper.load_model",
-        side_effect=fake_load_model,
-    ):
+    with patch.object(WhisperService, "_load_backend_model", side_effect=fake_load_backend_model):
         service = WhisperService()
         service._preferred_device = lambda: "cpu"  # type: ignore[method-assign]
         service.preload_model("large-v3")
         warmed_model = service._get_model("large-v3", "cpu")
 
-    assert warmed_model is service._model_cache[("large-v3", "cpu")]
-    assert loaded_models == [("large-v3", "cpu")]
+    assert warmed_model is service._model_cache[("large-v3", "cpu", "faster-whisper")]
+    assert loaded_models == [("large-v3", "cpu", "faster-whisper")]
 
 
 def test_ffmpeg_run_can_be_cancelled(monkeypatch) -> None:

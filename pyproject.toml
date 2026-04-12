@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Cross-platform desktop tool for generating and burning subtitles into videos."
 requires-python = ">=3.12"
 dependencies = [
+    "faster-whisper>=1.2.1",
     "imageio-ffmpeg>=0.6.0",
     "openai-whisper>=20250625",
     "PySide6>=6.9.0",

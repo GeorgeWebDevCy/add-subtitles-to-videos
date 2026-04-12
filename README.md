@@ -9,11 +9,11 @@ The current release is a Europe-focused multilingual workflow: local Whisper han
 - Select one or more videos from anywhere on disk.
 - Choose the source language or let Whisper detect it.
 - Choose a target subtitle language from the launch set.
-- Transcribe speech locally with Whisper, then translate subtitle text through an OpenAI-compatible API.
+- Transcribe speech locally with faster-whisper by default, then translate subtitle text through an OpenAI-compatible API.
 - Review the source transcript and translated SRT side by side before export.
 - Export an `.srt` file.
 - Optionally burn the subtitles directly into a new video file.
-- Run local transcription with `openai-whisper` and a bundled FFmpeg binary while keeping translation text-only.
+- Run local transcription with `faster-whisper` by default and a bundled FFmpeg binary while keeping translation text-only.
 
 ## Launch Languages
 
@@ -46,10 +46,12 @@ uv sync
 3. Launch the desktop app:
 
 ```bash
-uv run add-subtitles-to-videos
+powershell -ExecutionPolicy Bypass -File .\scripts\launch_windows_outside_venv.ps1
 ```
 
-On Windows, you can also double-click `launch-subtitle-foundry.vbs` to start the app without leaving a terminal window open.
+On Windows, the recommended launcher is `launch-subtitle-foundry.vbs`. It starts the app from a user-level Python 3.12 install outside the repo `.venv`, installs the external runtime dependencies automatically if they are missing, and keeps normal day-to-day app runs out of the project virtual environment.
+
+For local development tasks such as running tests, packaging, or editing dependencies, keep using `uv` commands from the repo as usual.
 
 Before running translated workflows, configure these values in the app:
 
@@ -62,7 +64,7 @@ If the source and target languages match, the app can run transcription-only wit
 ## Notes
 
 - The first run downloads the selected Whisper model, so it can take a while.
-- `large-v3` is the default because accuracy matters more than speed for subtitle review.
+- `large-v3` is the default because accuracy matters more than speed for subtitle review, and it now runs through `faster-whisper` by default on CPU and CUDA systems.
 - Whisper is used only for transcription and language detection. Many-to-many translation is handled by the configured text provider.
 - On Windows x64, the project is pinned to the official CUDA 12.4 PyTorch wheel so NVIDIA GPUs can be used automatically when available.
 - Burned-in subtitle exports are written with a new `.subtitled` suffix so your original files stay untouched.
@@ -72,7 +74,8 @@ If the source and target languages match, the app can run transcription-only wit
 
 - The app is built with `PySide6`, so the next packaging step is `pyside6-deploy` or a platform-specific packager such as PyInstaller.
 - Plan to build native installers separately on Windows, macOS, and Linux.
-- If you later want a faster GPU-focused backend on specific machines, `whisper.cpp` is the best follow-up option to evaluate.
+- `openai-whisper` remains available as a compatibility fallback for environments where `faster-whisper` is not a fit.
+- If you later want an even more specialized GPU-focused backend on specific machines, `whisper.cpp` is the next option to evaluate.
 
 ## Windows Packaging
 
