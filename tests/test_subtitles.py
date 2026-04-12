@@ -1645,3 +1645,73 @@ def test_standalone_edit_reset_reloads_from_disk(monkeypatch, tmp_path) -> None:
     assert window._review_mode == "standalone_edit"
 
     window.close()
+
+
+def test_standalone_edit_cancel_clean_no_prompt(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    question_calls: list = []
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "question",
+        lambda *a, **kw: question_calls.append(a) or main_window_module.QMessageBox.StandardButton.Discard,
+    )
+
+    srt_path = tmp_path / "demo.srt"
+    srt_content = "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
+    srt_path.write_text(srt_content, encoding="utf-8")
+    video_path = tmp_path / "demo.mp4"
+    video_path.write_bytes(b"video")
+
+    window = main_window_module.MainWindow()
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(srt_path))
+    window._start_existing_srt_edit()
+    # No edits — content matches what was loaded from disk (stripped)
+
+    window._on_cancel_edit_clicked()
+
+    assert len(question_calls) == 0  # No dialog shown
+    assert window._content_stack.currentIndex() == 0
+    assert window._review_mode is None
+
+    window.close()
+
+
+def test_standalone_edit_cancel_dirty_prompts(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+
+    srt_path = tmp_path / "demo.srt"
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+    video_path = tmp_path / "demo.mp4"
+    video_path.write_bytes(b"video")
+
+    window = main_window_module.MainWindow()
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(srt_path))
+    window._start_existing_srt_edit()
+
+    # Make a change
+    window.translated_srt_editor.setPlainText("1\n00:00:00,000 --> 00:00:01,000\nchanged")
+
+    # User clicks Cancel but then clicks Cancel on the confirmation dialog
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "question",
+        lambda *a, **kw: main_window_module.QMessageBox.StandardButton.Cancel,
+    )
+    window._on_cancel_edit_clicked()
+    assert window._content_stack.currentIndex() == 1  # Still in edit mode
+
+    # User clicks Cancel and confirms Discard
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "question",
+        lambda *a, **kw: main_window_module.QMessageBox.StandardButton.Discard,
+    )
+    window._on_cancel_edit_clicked()
+    assert window._content_stack.currentIndex() == 0
+    assert window._review_mode is None
+
+    window.close()

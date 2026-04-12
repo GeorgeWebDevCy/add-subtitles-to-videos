@@ -1015,7 +1015,19 @@ class MainWindow(QMainWindow):
         self.translated_srt_editor.setFocus()
 
     def _on_cancel_edit_clicked(self) -> None:
-        pass  # TODO: Task 6 — implement cancel standalone edit
+        current_text = self.translated_srt_editor.toPlainText()
+        original_stripped = (self._standalone_edit_original_text or "").strip()
+        if current_text != original_stripped:
+            response = QMessageBox.question(
+                self,
+                APP_NAME,
+                "You have unsaved changes. Discard them and return to the main panel?",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if response != QMessageBox.StandardButton.Discard:
+                return
+        self._leave_standalone_edit_mode()
 
     def _on_approve_clicked(self) -> None:
         if self._review_mode == "standalone_edit":
