@@ -921,25 +921,37 @@ class MainWindow(QMainWindow):
         self._set_busy(True)
         self._schedule_model_preload()
         _QUEUE_DISPATCHER.cancel_all()  # clear any stale state
-        _QUEUE_DISPATCHER.enqueue(DispatchJob(
-            file_index=self._current_file_index,
-            video_path=self._selected_files[self._current_file_index],
-            options=self._current_options,
-        ))
+        for i in range(len(self._selected_files)):
+            _QUEUE_DISPATCHER.enqueue(DispatchJob(
+                file_index=i,
+                video_path=self._selected_files[i],
+                options=self._current_options,
+            ))
         self._dispatch_pending()
 
     def _dispatch_pending(self) -> None:
-        """Assign the next queued file to a free worker slot."""
+        """Assign the next queued file to a free worker slot.
+
+        The first dispatched job runs as the primary (non-prefetch) transcription
+        unless a review is already active, in which case all dispatched jobs run as
+        prefetch so they don't try to replace the current review panel.
+        Subsequent jobs in the same call always run as prefetch (parallel workers).
+        """
         if getattr(self, "_stop_requested", False):
             return
+        primary_dispatched = False
         while True:
             result = _QUEUE_DISPATCHER.dispatch_next()
             if result is None:
                 break
             job, slot_index, client, device = result
+            # Only the first job in a batch (and only when no review is active) runs
+            # as the primary transcription. Every other job runs as prefetch.
+            as_prefetch = primary_dispatched or self._current_transcription is not None
+            primary_dispatched = True
             self._start_transcription(
                 job.file_index,
-                as_prefetch=False,
+                as_prefetch=as_prefetch,
                 worker_slot=slot_index,
                 worker_client=client,
                 worker_device=device,
@@ -1394,6 +1406,7 @@ class MainWindow(QMainWindow):
             )
             return
 
+        _QUEUE_DISPATCHER.cancel_job(next_index)
         self._start_transcription(next_index, as_prefetch=False)
 
     def _maybe_start_prefetch(self) -> None:
@@ -1417,6 +1430,7 @@ class MainWindow(QMainWindow):
                 self._refresh_review_queue_label()
             return
 
+        _QUEUE_DISPATCHER.cancel_job(next_index)
         self._start_transcription(next_index, as_prefetch=True)
         self._refresh_review_queue_label()
 
