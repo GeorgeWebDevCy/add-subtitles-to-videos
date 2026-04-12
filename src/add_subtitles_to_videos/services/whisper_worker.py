@@ -33,6 +33,9 @@ def _serialize_options(options: ProcessingOptions) -> dict[str, object]:
         "max_line_length": options.max_line_length,
         "subtitle_font_size": options.subtitle_font_size,
         "workflow_profile": WorkflowProfile(str(options.workflow_profile)).value,
+        "word_timestamps": options.word_timestamps,
+        "vad_threshold": options.vad_threshold,
+        "vad_min_silence_ms": options.vad_min_silence_ms,
     }
 
 
@@ -47,6 +50,9 @@ def _deserialize_options(payload: dict[str, object]) -> ProcessingOptions:
         max_line_length=int(payload["max_line_length"]),
         subtitle_font_size=int(payload["subtitle_font_size"]),
         workflow_profile=WorkflowProfile(str(payload["workflow_profile"])),
+        word_timestamps=bool(payload.get("word_timestamps", False)),
+        vad_threshold=float(payload.get("vad_threshold", 0.5)),
+        vad_min_silence_ms=int(payload.get("vad_min_silence_ms", 2000)),
     )
 
 
@@ -115,19 +121,33 @@ def _worker_main(command_queue, event_queue) -> None:
             continue
 
         job_id = int(command["job_id"])
+        device_override: str | None = command.get("device_override")  # type: ignore[assignment]
 
         def on_log(message: str) -> None:
             event_queue.put({"type": "log", "job_id": job_id, "message": message})
 
+        def on_progress(progress: float) -> None:
+            event_queue.put({"type": "progress", "job_id": job_id, "progress": progress})
+
         try:
             if command_type == "preload":
-                service.preload_model(str(command["model_name"]), log=on_log)
+                service.preload_model(
+                    str(command["model_name"]),
+                    log=on_log,
+                    device_override=device_override,
+                )
                 event_queue.put({"type": "preload_complete", "job_id": job_id})
                 continue
 
             options = _deserialize_options(command["options"])
             audio_path = Path(str(command["audio_path"]))
-            segments, metadata = service.transcribe(audio_path, options, log=on_log)
+            segments, metadata = service.transcribe(
+                audio_path,
+                options,
+                log=on_log,
+                device_override=device_override,
+                progress_callback=on_progress,
+            )
             event_queue.put(
                 {
                     "type": "result",
@@ -156,6 +176,8 @@ class WhisperWorkerClient:
         *,
         log: LogReporter | None = None,
         cancel_requested: CancelChecker | None = None,
+        device_override: str | None = None,
+        progress_callback: Callable[[float], None] | None = None,
     ) -> tuple[list[SubtitleSegment], TranscriptionMetadata]:
         with self._lock:
             self._ensure_process()
@@ -172,6 +194,7 @@ class WhisperWorkerClient:
                     "job_id": job_id,
                     "audio_path": str(audio_path),
                     "options": _serialize_options(options),
+                    "device_override": device_override,
                 }
             )
 
@@ -205,6 +228,11 @@ class WhisperWorkerClient:
                         log(str(event["message"]))
                     continue
 
+                if event_type == "progress":
+                    if progress_callback is not None:
+                        progress_callback(float(event["progress"]))
+                    continue
+
                 if event_type == "result":
                     return (
                         _deserialize_segments(event["segments"]),
@@ -219,6 +247,7 @@ class WhisperWorkerClient:
         model_name: str,
         *,
         log: LogReporter | None = None,
+        device_override: str | None = None,
     ) -> None:
         with self._lock:
             self._ensure_process()
@@ -233,6 +262,7 @@ class WhisperWorkerClient:
                     "type": "preload",
                     "job_id": job_id,
                     "model_name": model_name,
+                    "device_override": device_override,
                 }
             )
 
