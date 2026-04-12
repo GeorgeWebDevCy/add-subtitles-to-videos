@@ -1437,3 +1437,73 @@ def test_standalone_edit_panel_infrastructure(monkeypatch) -> None:
     assert window._review_source_pane.isHidden() is False
 
     window.close()
+
+
+def test_standalone_edit_mode_entry(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+
+    srt_path = tmp_path / "demo.srt"
+    srt_content = "1\n00:00:00,000 --> 00:00:01,000\nhello\n"
+    srt_path.write_text(srt_content, encoding="utf-8")
+    video_path = tmp_path / "demo.mp4"
+    video_path.write_bytes(b"video")
+
+    window = main_window_module.MainWindow()
+    window.existing_burn_video_edit.setText(str(video_path))
+    window.existing_burn_subtitle_edit.setText(str(srt_path))
+
+    window._start_existing_srt_edit()
+
+    assert window._content_stack.currentIndex() == 1
+    assert window._review_mode == "standalone_edit"
+    assert window._review_source_pane.isHidden() is True
+    assert window.review_queue_label.isHidden() is True
+    assert window.cancel_edit_button.isHidden() is False
+    assert window.approve_button.text() == "Save & Re-burn"
+    assert window.use_original_button.text() == "Reset to File"
+    assert window._review_panel_title.text() == "Edit SRT"
+    assert window.review_file_label.text() == "demo.srt"
+    assert "demo.srt" in window.review_summary_label.text()
+    assert "overwrite" in window.review_summary_label.text()
+    assert window.translated_srt_editor.toPlainText() == srt_content.strip()
+    assert window._standalone_edit_original_text == srt_content
+
+    window.close()
+
+
+def test_standalone_edit_entry_rejects_missing_fields(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    warning_calls: list[str] = []
+    monkeypatch.setattr(
+        main_window_module.QMessageBox,
+        "warning",
+        lambda *a, **kw: warning_calls.append(a[2]),
+    )
+
+    srt_path = tmp_path / "demo.srt"
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+
+    window = main_window_module.MainWindow()
+
+    # No video, no SRT
+    window._start_existing_srt_edit()
+    assert window._content_stack.currentIndex() == 0
+    assert len(warning_calls) == 1
+
+    # Video set, no SRT
+    warning_calls.clear()
+    window.existing_burn_video_edit.setText(str(tmp_path / "demo.mp4"))
+    window._start_existing_srt_edit()
+    assert window._content_stack.currentIndex() == 0
+    assert len(warning_calls) == 1
+
+    # Both set but SRT doesn't exist
+    warning_calls.clear()
+    window.existing_burn_subtitle_edit.setText(str(tmp_path / "missing.srt"))
+    window._start_existing_srt_edit()
+    assert window._content_stack.currentIndex() == 0
+    assert len(warning_calls) == 1
+
+    window.close()

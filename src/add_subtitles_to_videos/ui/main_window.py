@@ -1038,7 +1038,43 @@ class MainWindow(QMainWindow):
         self._start_finalize(self._current_transcription.translated_srt_text)
 
     def _start_existing_srt_edit(self) -> None:
-        pass  # TODO: Task 2 — implement standalone SRT edit entry point
+        video_text = self.existing_burn_video_edit.text().strip()
+        subtitle_text = self.existing_burn_subtitle_edit.text().strip()
+        if not video_text:
+            QMessageBox.warning(self, APP_NAME, "Choose a source video first.")
+            return
+        if not subtitle_text:
+            QMessageBox.warning(self, APP_NAME, "Choose an SRT file to edit.")
+            return
+        srt_path = Path(subtitle_text).expanduser().resolve()
+        if not srt_path.exists():
+            QMessageBox.warning(self, APP_NAME, "The selected SRT file does not exist.")
+            return
+        if srt_path.suffix.casefold() != ".srt":
+            QMessageBox.warning(self, APP_NAME, "Choose an SRT file with the .srt extension.")
+            return
+
+        srt_content = srt_path.read_text(encoding="utf-8")
+
+        self._review_mode = "standalone_edit"
+        self._standalone_edit_original_text = srt_content
+
+        self._review_panel_title.setText("Edit SRT")
+        self.review_file_label.setText(srt_path.name)
+        self.review_queue_label.setVisible(False)
+        self.review_summary_label.setText(
+            f"Editing {srt_path.name} — saving will overwrite the original file."
+        )
+        self._review_source_pane.setVisible(False)
+        self._review_translated_title.setText("SRT Contents")
+        self.translated_srt_editor.setPlaceholderText("SRT content will appear here.")
+        self.translated_srt_editor.setPlainText(srt_content.strip())
+        self.use_original_button.setText("Reset to File")
+        self.approve_button.setText("Save & Re-burn")
+        self.cancel_edit_button.setVisible(True)
+        self.review_warning_label.setVisible(False)
+
+        self._content_stack.setCurrentIndex(1)
 
     def _start_existing_burn(self) -> None:
         running = any(
