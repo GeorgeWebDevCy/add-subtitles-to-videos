@@ -1,5 +1,21 @@
 from __future__ import annotations
 
+CONFIDENCE_HIGHLIGHT_THRESHOLD: float = -0.6
+
+DEFAULT_VAD_THRESHOLD: float = 0.5
+DEFAULT_VAD_MIN_SILENCE_MS: int = 2000
+
+LANGUAGE_MODEL_PROFILES: dict[str, str] = {
+    "auto": "large-v3",
+    "el": "large-v3",
+    "en": "medium",
+    "de": "medium",
+    "fr": "medium",
+    "it": "medium",
+    "es": "medium",
+    "tr": "medium",
+}
+
 from pathlib import Path
 
 from .languages import source_language_options, target_language_options
