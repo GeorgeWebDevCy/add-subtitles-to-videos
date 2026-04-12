@@ -10,6 +10,7 @@ import torch
 import whisper
 
 from . import OperationCancelledError
+from .gpu import current_gpu_snapshot, format_gpu_snapshot
 from ..models import ProcessingOptions, SubtitleSegment, TranscriptionMetadata
 
 LogReporter = Callable[[str], None]
@@ -44,21 +45,26 @@ class WhisperService:
             log,
             f"{load_message} Whisper model '{options.whisper_model}' on {self._device_label(device)}",
         )
+        self._emit_gpu_snapshot(log, "CUDA before model load")
         self._emit_log(log, "Whisper task: transcribe")
 
         model = self._get_model(options.whisper_model, device)
+        self._emit_gpu_snapshot(log, "CUDA after model load")
         self._check_cancel(cancel_requested)
         audio = self._read_pcm_wave(audio_path)
         self._check_cancel(cancel_requested)
-        result = model.transcribe(
-            audio,
-            language=source_language,
-            task="transcribe",
-            fp16=fp16_enabled,
-            verbose=None,
-            condition_on_previous_text=False,
-        )
+        self._emit_gpu_snapshot(log, "CUDA before inference")
+        with torch.inference_mode():
+            result = model.transcribe(
+                audio,
+                language=source_language,
+                task="transcribe",
+                fp16=fp16_enabled,
+                verbose=None,
+                condition_on_previous_text=False,
+            )
         self._check_cancel(cancel_requested)
+        self._emit_gpu_snapshot(log, "CUDA after inference")
 
         items: list[SubtitleSegment] = []
         for segment in result.get("segments", []):
@@ -96,6 +102,7 @@ class WhisperService:
             f"{load_message} Whisper model '{model_name}' on {self._device_label(device)}",
         )
         self._get_model(model_name, device)
+        self._emit_gpu_snapshot(log, "CUDA after warmup")
 
     def _get_model(self, model_name: str, device: str) -> whisper.model.Whisper:
         cache_key = (model_name, device)
@@ -139,6 +146,13 @@ class WhisperService:
     def _emit_log(log: LogReporter | None, message: str) -> None:
         if log is not None:
             log(message)
+
+    @classmethod
+    def _emit_gpu_snapshot(cls, log: LogReporter | None, prefix: str) -> None:
+        snapshot = current_gpu_snapshot()
+        if snapshot is None:
+            return
+        cls._emit_log(log, f"{prefix}: {format_gpu_snapshot(snapshot)}")
 
     @staticmethod
     def _check_cancel(cancel_requested: CancelChecker | None) -> None:

@@ -22,6 +22,7 @@ from add_subtitles_to_videos.models import (
 )
 from add_subtitles_to_videos.services import OperationCancelledError
 from add_subtitles_to_videos.services import ffmpeg as ffmpeg_module
+from add_subtitles_to_videos.services.gpu import GpuSnapshot
 from add_subtitles_to_videos.services.pipeline import SubtitlePipeline
 from add_subtitles_to_videos.services.subtitles import (
     format_srt_timestamp,
@@ -105,6 +106,27 @@ class FakeTranslationService:
         ]
 
 
+class FakeSleepInhibitor:
+    def __init__(self) -> None:
+        self.activations = 0
+        self.releases = 0
+        self.active = False
+
+    def activate(self) -> bool:
+        if self.active:
+            return False
+        self.active = True
+        self.activations += 1
+        return True
+
+    def release(self) -> bool:
+        if not self.active:
+            return False
+        self.active = False
+        self.releases += 1
+        return True
+
+
 def _options(
     tmp_path: Path,
     *,
@@ -167,6 +189,8 @@ def _transcription_result(video_path: Path) -> TranscriptionResult:
 def _patch_settings(monkeypatch, initial: dict[str, str] | None = None) -> FakeSettings:
     settings = FakeSettings(initial)
     monkeypatch.setattr(main_window_module, "QSettings", lambda *args, **kwargs: settings)
+    monkeypatch.setattr(main_window_module, "current_gpu_snapshot", lambda: None)
+    monkeypatch.setattr(main_window_module, "create_sleep_inhibitor", lambda: FakeSleepInhibitor())
     return settings
 
 
@@ -898,6 +922,33 @@ def test_main_window_shows_launch_languages_and_missing_key_status(monkeypatch) 
     window.close()
 
 
+def test_main_window_refresh_gpu_status_shows_cuda_snapshot(monkeypatch) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    monkeypatch.setattr(
+        main_window_module,
+        "current_gpu_snapshot",
+        lambda: GpuSnapshot(
+            name="NVIDIA GeForce RTX 4060",
+            total_memory_mib=8188,
+            free_memory_mib=4096,
+            used_memory_mib=4092,
+            allocated_memory_mib=2048,
+            reserved_memory_mib=2304,
+            utilization_gpu_percent=37,
+            temperature_c=54,
+        ),
+    )
+
+    window = main_window_module.MainWindow()
+
+    assert "RTX 4060" in window.gpu_value.text()
+    assert "37% util" in window.gpu_value.text()
+    assert "4092/8188 MiB used" == window.vram_value.text()
+
+    window.close()
+
+
 def test_main_window_save_translation_settings_persists_locally(monkeypatch) -> None:
     _application()
     settings = _patch_settings(monkeypatch)
@@ -977,6 +1028,38 @@ def test_main_window_blocks_review_when_srt_structure_changes(monkeypatch, tmp_p
     window.close()
 
 
+def test_main_window_restores_autosaved_review_draft_from_disk(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    video_path = tmp_path / "demo.mp4"
+    transcription = _transcription_result(video_path)
+    drafts_dir = tmp_path / "review-drafts"
+
+    window = main_window_module.MainWindow()
+    monkeypatch.setattr(window, "_review_drafts_directory", lambda: drafts_dir)
+    window._show_review(transcription, 0)
+    edited_text = window.translated_srt_editor.toPlainText().replace("hello", "hello there", 1)
+    window.translated_srt_editor.setPlainText(edited_text)
+    window._flush_review_draft(force=True)
+
+    draft_files = list(drafts_dir.glob("*.draft.srt"))
+    assert len(draft_files) == 1
+    assert draft_files[0].read_text(encoding="utf-8") == edited_text
+
+    window._on_cancelled("Processing stopped by user.")
+    window.close()
+
+    restored_window = main_window_module.MainWindow()
+    monkeypatch.setattr(restored_window, "_review_drafts_directory", lambda: drafts_dir)
+    restored_window._show_review(transcription, 0)
+
+    assert restored_window.translated_srt_editor.toPlainText() == edited_text
+    assert "Restored a local draft" in restored_window.review_autosave_label.text()
+
+    restored_window._on_cancelled("Processing stopped by user.")
+    restored_window.close()
+
+
 def test_main_window_keeps_transcription_thread_alive_until_finished(monkeypatch, tmp_path) -> None:
     _application()
     _patch_settings(monkeypatch, {"translation/api_key": "secret"})
@@ -1046,6 +1129,32 @@ def test_main_window_can_stop_active_processing(monkeypatch, tmp_path) -> None:
     assert window.queue_value.text() == "Stopped after 0 of 1 finished"
     assert not window.stop_button.isEnabled()
     assert _pump_events_until(lambda: window._transcription_thread is None)
+
+    window.close()
+
+
+def test_main_window_releases_sleep_inhibitor_after_queue_finishes(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch, {"translation/api_key": "secret"})
+    inhibitor = FakeSleepInhibitor()
+    monkeypatch.setattr(main_window_module, "create_sleep_inhibitor", lambda: inhibitor)
+    monkeypatch.setattr(main_window_module, "TranscriptionThread", ImmediateTranscriptionThread)
+    monkeypatch.setattr(main_window_module, "FinalizeThread", ImmediateFinalizeThread)
+
+    window = main_window_module.MainWindow()
+    window._schedule_model_preload = lambda: None  # type: ignore[method-assign]
+    window._selected_files = [tmp_path / "demo.mp4"]
+    window.output_directory_edit.setText(str(tmp_path))
+
+    window._start_processing()
+
+    assert inhibitor.activations == 1
+    assert _pump_events_until(lambda: window._content_stack.currentIndex() == 1)
+
+    window._on_approve_clicked()
+
+    assert _pump_events_until(lambda: window.status_label.text() == "All subtitle jobs finished.")
+    assert inhibitor.releases == 1
 
     window.close()
 

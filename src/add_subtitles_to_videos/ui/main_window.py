@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from hashlib import sha1
 from pathlib import Path
 from time import monotonic
 
-from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
+from PySide6.QtCore import QSettings, QSignalBlocker, QStandardPaths, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
@@ -53,6 +54,7 @@ from ..config import (
 from ..languages import language_label
 from ..models import OutputMode, PipelineResult, ProcessingOptions, SubtitleSegment, TranscriptionResult
 from ..services import OperationCancelledError
+from ..services.gpu import current_gpu_snapshot
 from ..services.pipeline import SubtitlePipeline
 from ..services.subtitles import validate_review_srt_text
 from ..services.translation import (
@@ -60,6 +62,7 @@ from ..services.translation import (
     TranslationProviderConfig,
     TranslationServiceError,
 )
+from ..services.power import create_sleep_inhibitor
 from ..services.whisper_worker import WhisperWorkerClient
 
 TRANSCRIPTION_WORKER = WhisperWorkerClient()
@@ -207,14 +210,24 @@ class MainWindow(QMainWindow):
         self._review_started_at: float | None = None
         self._active_transcription_index: int | None = None
         self._active_transcription_is_prefetch = False
+        self._current_review_draft_path: Path | None = None
+        self._last_autosaved_review_text: str | None = None
         self._job_started_at: datetime | None = None
         self._stop_requested = False
         self._exit_fullscreen_shortcut: QShortcut | None = None
         self._toggle_fullscreen_shortcut: QShortcut | None = None
+        self._sleep_inhibitor = create_sleep_inhibitor()
 
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(1000)
         self._elapsed_timer.timeout.connect(self._update_elapsed_label)
+        self._gpu_poll_timer = QTimer(self)
+        self._gpu_poll_timer.setInterval(2000)
+        self._gpu_poll_timer.timeout.connect(self._refresh_gpu_status)
+        self._review_autosave_timer = QTimer(self)
+        self._review_autosave_timer.setInterval(750)
+        self._review_autosave_timer.setSingleShot(True)
+        self._review_autosave_timer.timeout.connect(self._flush_review_draft)
 
         self.setWindowTitle(APP_NAME)
         self.resize(1420, 860)
@@ -225,6 +238,7 @@ class MainWindow(QMainWindow):
         self._load_provider_settings()
         self._refresh_translation_status()
         self._refresh_summary(None)
+        self._refresh_gpu_status()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -510,6 +524,8 @@ class MainWindow(QMainWindow):
         self.active_file_value = self._status_value("Waiting for a job")
         self.queue_value = self._status_value("No files running")
         self.engine_value = self._status_value("Automatic")
+        self.gpu_value = self._status_value("Checking CUDA")
+        self.vram_value = self._status_value("Checking VRAM")
         self.elapsed_value = self._status_value("00:00")
 
         status_grid.addWidget(self._status_title("Active file"), 0, 0)
@@ -518,8 +534,12 @@ class MainWindow(QMainWindow):
         status_grid.addWidget(self.queue_value, 1, 1)
         status_grid.addWidget(self._status_title("Engine"), 2, 0)
         status_grid.addWidget(self.engine_value, 2, 1)
-        status_grid.addWidget(self._status_title("Elapsed"), 3, 0)
-        status_grid.addWidget(self.elapsed_value, 3, 1)
+        status_grid.addWidget(self._status_title("GPU"), 3, 0)
+        status_grid.addWidget(self.gpu_value, 3, 1)
+        status_grid.addWidget(self._status_title("VRAM"), 4, 0)
+        status_grid.addWidget(self.vram_value, 4, 1)
+        status_grid.addWidget(self._status_title("Elapsed"), 5, 0)
+        status_grid.addWidget(self.elapsed_value, 5, 1)
         layout.addLayout(status_grid)
 
         self.run_button = QPushButton("Transcribe and review")
@@ -631,7 +651,13 @@ class MainWindow(QMainWindow):
         self.translated_srt_editor.setPlaceholderText(
             "Translated SRT text will appear here. You can edit wording, but timing must stay unchanged."
         )
+        self.translated_srt_editor.textChanged.connect(self._schedule_review_draft_autosave)
         translated_layout.addWidget(self.translated_srt_editor, stretch=1)
+
+        self.review_autosave_label = QLabel("Edits autosave locally on this machine while you review.")
+        self.review_autosave_label.setObjectName("supportingText")
+        self.review_autosave_label.setWordWrap(True)
+        translated_layout.addWidget(self.review_autosave_label)
         transcript_splitter.addWidget(translated_card)
         transcript_splitter.setSizes([640, 700])
 
@@ -755,6 +781,9 @@ class MainWindow(QMainWindow):
         self._job_started_at = datetime.now()
         self._elapsed_timer.start()
         self._update_elapsed_label()
+        self._gpu_poll_timer.start()
+        self._refresh_gpu_status()
+        self._set_sleep_inhibition(True)
         self._set_busy(True)
         self._schedule_model_preload()
         self._start_transcription(self._current_file_index, as_prefetch=False)
@@ -830,7 +859,7 @@ class MainWindow(QMainWindow):
         self.review_file_label.setText(result.input_video.name)
         self.review_summary_label.setText(self._review_summary_text(result))
         self.source_srt_view.setPlainText(result.source_srt_text)
-        self.translated_srt_editor.setPlainText(result.translated_srt_text)
+        self._load_review_draft(result)
         self.review_warning_label.setVisible(False)
         self.status_label.setText(f"Review translated subtitles for {result.input_video.name}")
         self.stop_button.setEnabled(True)
@@ -868,6 +897,8 @@ class MainWindow(QMainWindow):
                 f"{self._current_transcription.input_video.name}: Review completed in {review_wait_seconds:.2f}s"
             )
         self._review_started_at = None
+        self._flush_review_draft(force=True)
+        self._review_autosave_timer.stop()
 
         self._content_stack.setCurrentIndex(0)
         self.status_label.setText(
@@ -900,6 +931,8 @@ class MainWindow(QMainWindow):
 
     def _on_finalize_completed(self, result: PipelineResult, review_wait_seconds: float) -> None:
         result.stage_durations["review_wait_seconds"] = review_wait_seconds
+        self._delete_review_draft(result.input_video, result.target_language)
+        self._clear_active_review_draft_state()
         self._all_results.append(result)
         self._refresh_summary(result)
         self._current_file_index += 1
@@ -912,11 +945,14 @@ class MainWindow(QMainWindow):
     def _on_all_done(self) -> None:
         self._set_busy(False)
         self._elapsed_timer.stop()
+        self._gpu_poll_timer.stop()
         self._job_started_at = None
         self._stop_requested = False
         self.stop_button.setEnabled(False)
         self._review_started_at = None
+        self._clear_active_review_draft_state()
         self._clear_prefetch_state()
+        self._set_sleep_inhibition(False)
         self.status_label.setText("All subtitle jobs finished.")
         self.progress_bar.setValue(100)
         self._append_log(f"Finished all {len(self._all_results)} queued videos.")
@@ -927,14 +963,18 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
 
     def _on_failed(self, error_message: str) -> None:
+        self._flush_review_draft(force=True)
         self._set_busy(False)
         self._elapsed_timer.stop()
+        self._gpu_poll_timer.stop()
         self._job_started_at = None
         self._stop_requested = False
         self.stop_button.setEnabled(False)
         self._review_started_at = None
         self._current_transcription = None
+        self._clear_active_review_draft_state()
         self._clear_prefetch_state()
+        self._set_sleep_inhibition(False)
         self._content_stack.setCurrentIndex(0)
         self.status_label.setText("The subtitle pipeline hit an error.")
         self._append_log(error_message)
@@ -944,14 +984,18 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, APP_NAME, error_message)
 
     def _on_cancelled(self, message: str) -> None:
+        self._flush_review_draft(force=True)
         self._set_busy(False)
         self._elapsed_timer.stop()
+        self._gpu_poll_timer.stop()
         self._job_started_at = None
         self._stop_requested = False
         self.stop_button.setEnabled(False)
         self._review_started_at = None
         self._current_transcription = None
+        self._clear_active_review_draft_state()
         self._clear_prefetch_state()
+        self._set_sleep_inhibition(False)
         self._content_stack.setCurrentIndex(0)
         self.status_label.setText("Processing stopped.")
         self.active_file_value.setText("Stopped")
@@ -1217,6 +1261,136 @@ class MainWindow(QMainWindow):
         self.log_output.appendPlainText(f"[{timestamp}] {message}")
         if "Whisper model" in message and " on " in message:
             self.engine_value.setText(message.rsplit(" on ", 1)[1])
+        if "CUDA " in message:
+            self._refresh_gpu_status()
+
+    @staticmethod
+    def _default_review_autosave_message() -> str:
+        return "Edits autosave locally on this machine while you review."
+
+    def _review_drafts_directory(self) -> Path:
+        location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+        if location:
+            return Path(location) / "review-drafts"
+        return Path.home() / ".subtitle-foundry" / "review-drafts"
+
+    def _review_draft_path(self, input_video: Path, target_language: str | None) -> Path:
+        safe_stem = "".join(character if character.isalnum() or character in "-._" else "_" for character in input_video.stem)
+        safe_stem = safe_stem.strip("._") or "video"
+        language_code = (target_language or "unknown").strip() or "unknown"
+        draft_key = f"{input_video.resolve()}::{language_code}"
+        digest = sha1(draft_key.encode("utf-8")).hexdigest()[:16]
+        return self._review_drafts_directory() / f"{safe_stem}.{language_code}.{digest}.draft.srt"
+
+    def _load_review_draft(self, result: TranscriptionResult) -> None:
+        draft_path = self._review_draft_path(result.input_video, result.metadata.target_language)
+        restored_text: str | None = None
+        if draft_path.exists():
+            try:
+                restored_text = draft_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                self._append_log(f"{result.input_video.name}: Couldn't restore local review draft: {exc}")
+
+        blocker = QSignalBlocker(self.translated_srt_editor)
+        try:
+            self.translated_srt_editor.setPlainText(restored_text or result.translated_srt_text)
+        finally:
+            del blocker
+
+        self._current_review_draft_path = draft_path
+        self._last_autosaved_review_text = None
+        self._flush_review_draft(force=True)
+        if restored_text is not None:
+            self.review_autosave_label.setText(
+                "Restored a local draft from the last session. New edits keep autosaving locally."
+            )
+            self._append_log(f"{result.input_video.name}: Restored autosaved review draft.")
+            return
+        self.review_autosave_label.setText(self._default_review_autosave_message())
+
+    def _schedule_review_draft_autosave(self) -> None:
+        if self._current_transcription is None or self._current_review_draft_path is None:
+            return
+        self._review_autosave_timer.start()
+
+    def _flush_review_draft(self, force: bool = False) -> None:
+        if self._current_transcription is None or self._current_review_draft_path is None:
+            return
+
+        draft_text = self.translated_srt_editor.toPlainText()
+        if not force and draft_text == self._last_autosaved_review_text:
+            return
+
+        try:
+            self._current_review_draft_path.parent.mkdir(parents=True, exist_ok=True)
+            self._current_review_draft_path.write_text(draft_text, encoding="utf-8")
+        except OSError as exc:
+            self.review_autosave_label.setText("Local draft autosave failed. Check free space and folder permissions.")
+            self._append_log(f"{self._current_transcription.input_video.name}: Local draft autosave failed: {exc}")
+            return
+
+        self._last_autosaved_review_text = draft_text
+        if draft_text != self._current_transcription.translated_srt_text:
+            self.review_autosave_label.setText(
+                "Draft autosaved locally. If the app closes, this review draft will be restored next time."
+            )
+        else:
+            self.review_autosave_label.setText(self._default_review_autosave_message())
+
+    def _delete_review_draft(self, input_video: Path, target_language: str | None) -> None:
+        draft_path = self._review_draft_path(input_video, target_language)
+        if draft_path.exists():
+            try:
+                draft_path.unlink()
+            except OSError as exc:
+                self._append_log(f"{input_video.name}: Couldn't remove local review draft after finalize: {exc}")
+
+    def _clear_active_review_draft_state(self) -> None:
+        self._review_autosave_timer.stop()
+        self._current_review_draft_path = None
+        self._last_autosaved_review_text = None
+        self.review_autosave_label.setText(self._default_review_autosave_message())
+
+    def _set_sleep_inhibition(self, active: bool) -> None:
+        try:
+            changed = self._sleep_inhibitor.activate() if active else self._sleep_inhibitor.release()
+        except OSError as exc:
+            state = "enable" if active else "release"
+            self._append_log(f"Couldn't {state} Windows sleep prevention: {exc}")
+            return
+
+        if not changed:
+            return
+        if active:
+            self._append_log("Windows idle sleep prevention is active while subtitle work is running.")
+        else:
+            self._append_log("Windows idle sleep prevention released.")
+
+    def _refresh_gpu_status(self) -> None:
+        snapshot = current_gpu_snapshot()
+        if snapshot is None:
+            self.gpu_value.setText("CUDA unavailable")
+            self.vram_value.setText("Unavailable")
+            return
+
+        utilization = (
+            f"{snapshot.utilization_gpu_percent}% util"
+            if snapshot.utilization_gpu_percent is not None
+            else "util unknown"
+        )
+        temperature = (
+            f"{snapshot.temperature_c}C"
+            if snapshot.temperature_c is not None
+            else "temp unknown"
+        )
+        self.gpu_value.setText(f"{snapshot.name} | {utilization} | {temperature}")
+        if snapshot.used_memory_mib is not None and snapshot.total_memory_mib is not None:
+            self.vram_value.setText(f"{snapshot.used_memory_mib}/{snapshot.total_memory_mib} MiB used")
+        elif snapshot.free_memory_mib is not None and snapshot.total_memory_mib is not None:
+            used_mib = max(0, snapshot.total_memory_mib - snapshot.free_memory_mib)
+            self.vram_value.setText(f"{used_mib}/{snapshot.total_memory_mib} MiB used")
+        else:
+            self.vram_value.setText("Usage unknown")
 
     def _update_elapsed_label(self) -> None:
         if self._job_started_at is None:
@@ -1396,6 +1570,8 @@ class MainWindow(QMainWindow):
         for thread in (self._transcription_thread, self._finalize_thread, self._preload_thread):
             if thread is not None:
                 thread.wait(1000)
+        self._gpu_poll_timer.stop()
+        self._set_sleep_inhibition(False)
         TRANSCRIPTION_WORKER.close()
         super().closeEvent(event)
 
