@@ -202,6 +202,7 @@ class DelayedTranscriptionThread(QThread):
     completed = Signal(object)
     cancelled = Signal(str)
     failed = Signal(str)
+    file_progress_changed = Signal(int, float)
 
     def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:
         super().__init__()
@@ -221,6 +222,7 @@ class CancellableTranscriptionThread(QThread):
     completed = Signal(object)
     cancelled = Signal(str)
     failed = Signal(str)
+    file_progress_changed = Signal(int, float)
 
     def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:
         super().__init__()
@@ -240,6 +242,7 @@ class ImmediateTranscriptionThread(QThread):
     completed = Signal(object)
     cancelled = Signal(str)
     failed = Signal(str)
+    file_progress_changed = Signal(int, float)
 
     def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:
         super().__init__()
@@ -344,6 +347,7 @@ class ImmediateThenDelayedPrefetchThread(QThread):
     completed = Signal(object)
     cancelled = Signal(str)
     failed = Signal(str)
+    file_progress_changed = Signal(int, float)
 
     def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:
         super().__init__()
@@ -367,6 +371,7 @@ class ImmediateThenCancellablePrefetchThread(QThread):
     completed = Signal(object)
     cancelled = Signal(str)
     failed = Signal(str)
+    file_progress_changed = Signal(int, float)
     started_files: list[str] = []
 
     def __init__(self, video_path, options, translation_service, file_index, total_files, **kwargs) -> None:

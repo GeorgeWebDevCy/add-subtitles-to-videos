@@ -75,6 +75,7 @@ class TranscriptionThread(QThread):
     completed = Signal(object)
     cancelled = Signal(str)
     failed = Signal(str)
+    file_progress_changed = Signal(int, float)  # file_index, progress 0.0–1.0
 
     def __init__(
         self,
@@ -109,12 +110,16 @@ class TranscriptionThread(QThread):
             def on_log(message: str) -> None:
                 self.log_message.emit(f"{self._video_path.name}: {message}")
 
+            def on_whisper_progress(progress: float) -> None:
+                self.file_progress_changed.emit(self._file_index, progress)
+
             result = pipeline.transcribe(
                 self._video_path,
                 self._options,
                 progress=on_progress,
                 log=on_log,
                 cancel_requested=self.isInterruptionRequested,
+                whisper_progress_callback=on_whisper_progress,
             )
             self.completed.emit(result)
         except OperationCancelledError as exc:
@@ -258,6 +263,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._settings = QSettings("Subtitle Foundry", APP_NAME)
         self._selected_files: list[Path] = []
+        self._file_status: dict[int, str] = {}   # file_index → status label
+        self._file_progress: dict[int, float] = {}  # file_index → 0.0–1.0
         self._current_options: ProcessingOptions | None = None
         self._current_translation_service: OpenAICompatibleTranslationService | None = None
         self._current_file_index = 0
@@ -905,6 +912,8 @@ class MainWindow(QMainWindow):
         self._stop_requested = False
         self._current_transcription = None
         self._review_started_at = None
+        self._file_status = {}
+        self._file_progress = {}
         self._clear_prefetch_state()
 
         self.progress_bar.setValue(0)
@@ -1006,6 +1015,7 @@ class MainWindow(QMainWindow):
             thread.completed.connect(
                 lambda result, index=file_index: self._on_transcription_completed(result, index)
             )
+        thread.file_progress_changed.connect(self._on_file_progress)
         thread.cancelled.connect(self._on_cancelled)
         thread.failed.connect(self._on_failed)
         thread.finished.connect(lambda t=thread: self._on_thread_finished(t))
@@ -1014,6 +1024,22 @@ class MainWindow(QMainWindow):
         self._active_transcription_index = file_index
         self._active_transcription_is_prefetch = as_prefetch
         thread.start()
+
+    def _on_file_progress(self, file_index: int, progress: float) -> None:
+        self._file_progress[file_index] = progress
+        self._file_status[file_index] = "Transcribing"
+        self._refresh_file_list()
+
+    def _refresh_file_list(self) -> None:
+        self.video_list.clear()
+        for i, path in enumerate(self._selected_files):
+            status = self._file_status.get(i, "Queued")
+            progress = self._file_progress.get(i, 0.0)
+            pct = int(progress * 100)
+            label = f"{path.name}  [{status}]" + (f"  {pct}%" if status == "Transcribing" else "")
+            item = QListWidgetItem(label)
+            item.setToolTip(str(path))
+            self.video_list.addItem(item)
 
     def _on_transcription_completed(self, result: TranscriptionResult, file_index: int) -> None:
         self._waiting_for_prefetched_review = False

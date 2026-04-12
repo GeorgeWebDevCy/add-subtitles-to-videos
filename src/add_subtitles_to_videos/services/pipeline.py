@@ -72,6 +72,7 @@ class SubtitlePipeline:
         progress: ProgressReporter | None = None,
         log: LogReporter | None = None,
         cancel_requested: CancelChecker | None = None,
+        whisper_progress_callback: Callable[[float], None] | None = None,
     ) -> TranscriptionResult:
         input_video = video_path.expanduser().resolve()
         stage_durations: dict[str, float] = {}
@@ -98,6 +99,7 @@ class SubtitlePipeline:
                 options,
                 log=log,
                 cancel_requested=cancel_requested,
+                progress_callback=whisper_progress_callback,
             )
             stage_durations["whisper_seconds"] = perf_counter() - whisper_started_at
             self._emit_log(log, f"Whisper transcription completed in {stage_durations['whisper_seconds']:.2f}s")
