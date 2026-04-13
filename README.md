@@ -15,6 +15,16 @@ The current release is a Europe-focused multilingual workflow: local Whisper han
 - Optionally burn the subtitles directly into a new video file.
 - Run local transcription with `faster-whisper` by default and a bundled FFmpeg binary while keeping translation text-only.
 
+## Screenshots
+
+Main dashboard:
+
+![Subtitle Foundry main dashboard](docs/screenshots/main-dashboard.png)
+
+Review workflow:
+
+![Subtitle Foundry review editor](docs/screenshots/review-editor.png)
+
 ## Launch Languages
 
 - English
