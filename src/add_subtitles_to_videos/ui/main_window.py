@@ -3,10 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from hashlib import sha1
 from pathlib import Path
+import re
 from time import monotonic
 
 from PySide6.QtCore import QSettings, QSignalBlocker, QStandardPaths, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -56,7 +57,12 @@ from ..models import OutputMode, PipelineResult, ProcessingOptions, SubtitleSegm
 from ..services import OperationCancelledError, ffmpeg
 from ..services.gpu import current_gpu_snapshot
 from ..services.pipeline import SubtitlePipeline
-from ..services.subtitles import format_srt_timestamp, parse_srt_text, validate_review_srt_text
+from ..services.subtitles import (
+    format_srt_timestamp,
+    parse_srt_text,
+    segments_to_plain_srt_text,
+    validate_review_srt_text,
+)
 from ..services.translation import (
     OpenAICompatibleTranslationService,
     TranslationProviderConfig,
@@ -750,7 +756,7 @@ class MainWindow(QMainWindow):
         self.translated_srt_editor = QPlainTextEdit()
         self.translated_srt_editor.setObjectName("translatedTranscriptPanel")
         self.translated_srt_editor.setPlaceholderText(
-            "Translated SRT text will appear here. Keep the original timed blocks, but you can add extra SRT blocks for missed subtitles."
+            "Translated SRT text will appear here. Keep the original timed blocks, add extra SRT blocks for missed subtitles, or leave a block blank when no caption is needed."
         )
         self.translated_srt_editor.textChanged.connect(self._schedule_review_draft_autosave)
         translated_layout.addWidget(self.translated_srt_editor, stretch=1)
@@ -765,7 +771,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(transcript_splitter, stretch=1)
 
         self.review_warning_label = QLabel(
-            "Keep every original subtitle block and timestamp, but you can insert extra blocks for missed subtitles."
+            "Keep every original subtitle block and timestamp, but you can insert extra blocks for missed subtitles or leave a block blank when no caption is needed."
         )
         self.review_warning_label.setObjectName("warningText")
         self.review_warning_label.setVisible(False)
@@ -995,6 +1001,9 @@ class MainWindow(QMainWindow):
         self.review_summary_label.setText(self._review_summary_text(result))
         self.source_srt_view.setPlainText(result.source_srt_text)
         self._load_review_draft(result)
+        review_cursor = self.translated_srt_editor.textCursor()
+        review_cursor.setPosition(len(self.translated_srt_editor.toPlainText()))
+        self.translated_srt_editor.setTextCursor(review_cursor)
         self.review_warning_label.setVisible(False)
         self.status_label.setText(f"Review translated subtitles for {result.input_video.name}")
         self.stop_button.setEnabled(True)
@@ -1003,13 +1012,35 @@ class MainWindow(QMainWindow):
         self._maybe_start_prefetch()
 
     def _on_insert_missing_segment_clicked(self) -> None:
-        template = self._missing_segment_template()
-        if self.translated_srt_editor.toPlainText().strip():
+        self.review_warning_label.setVisible(False)
+        current_text = self.translated_srt_editor.toPlainText()
+        if not current_text.strip():
+            template = self._missing_segment_template()
+            self.translated_srt_editor.setPlainText(template + "\n")
+            self._focus_missing_segment_placeholder(template)
+            return
+
+        try:
+            parsed_segments = parse_srt_text(current_text, allow_empty_text=True)
+        except ValueError:
+            template = self._missing_segment_template()
             self.translated_srt_editor.appendPlainText("")
             self.translated_srt_editor.appendPlainText(template)
-        else:
-            self.translated_srt_editor.setPlainText(template + "\n")
-        self.translated_srt_editor.setFocus()
+            self._focus_missing_segment_placeholder(template)
+            return
+
+        insert_at_index = self._missing_segment_insert_index(
+            current_text,
+            self.translated_srt_editor.textCursor().position(),
+        )
+        inserted_segment = self._missing_segment_segment(insert_at_index, parsed_segments)
+        updated_segments = list(parsed_segments)
+        updated_segments.insert(insert_at_index, inserted_segment)
+        updated_text = segments_to_plain_srt_text(updated_segments, include_empty_text=True)
+        self.translated_srt_editor.setPlainText(updated_text)
+        self._focus_missing_segment_placeholder(
+            self._missing_segment_block(insert_at_index + 1, inserted_segment),
+        )
 
     def _on_cancel_edit_clicked(self) -> None:
         current_text = self.translated_srt_editor.toPlainText()
@@ -1052,10 +1083,10 @@ class MainWindow(QMainWindow):
             self.review_warning_label.setVisible(True)
             return
         try:
-            parse_srt_text(srt_text)
+            parse_srt_text(srt_text, allow_empty_text=True)
         except ValueError:
             self.review_warning_label.setText(
-                "The SRT text is not valid. Check that each block has an index, a timestamp line, and text."
+                "The SRT text is not valid. Check that each block has an index, a timestamp line, and optional subtitle text."
             )
             self.review_warning_label.setVisible(True)
             return
@@ -1142,7 +1173,7 @@ class MainWindow(QMainWindow):
         self._review_source_pane.setVisible(True)
         self._review_translated_title.setText("Translated Subtitle Draft")
         self.translated_srt_editor.setPlaceholderText(
-            "Translated SRT text will appear here. Keep the original timed blocks, but you can add extra SRT blocks for missed subtitles."
+            "Translated SRT text will appear here. Keep the original timed blocks, add extra SRT blocks for missed subtitles, or leave a block blank when no caption is needed."
         )
         self.use_original_button.setText("Use Original Draft")
         self.approve_button.setText("Approve & Continue")
@@ -1254,30 +1285,145 @@ class MainWindow(QMainWindow):
         self._existing_burn_subtitle_path = None
         self._existing_burn_output_path = None
 
-    def _missing_segment_template(self) -> str:
-        next_index = 1
-        start_seconds = 0.0
-        end_seconds = 1.5
-        current_text = self.translated_srt_editor.toPlainText().strip()
-        if current_text:
-            try:
-                parsed_segments = parse_srt_text(current_text)
-            except ValueError:
-                parsed_segments = []
-            if parsed_segments:
-                next_index = len(parsed_segments) + 1
-                start_seconds = parsed_segments[-1].end_seconds
-                end_seconds = start_seconds + 1.5
-        elif self._current_transcription is not None and self._current_transcription.review_segments:
-            next_index = len(self._current_transcription.review_segments) + 1
-            start_seconds = self._current_transcription.review_segments[-1].end_seconds
+    @staticmethod
+    def _missing_segment_placeholder() -> str:
+        return "[Add missing subtitle text here]"
+
+    def _missing_segment_template(
+        self,
+        insert_at_index: int | None = None,
+        parsed_segments: list[SubtitleSegment] | None = None,
+    ) -> str:
+        sequence_number = 1
+        resolved_segments = list(parsed_segments or [])
+        if insert_at_index is not None:
+            sequence_number = insert_at_index + 1
+        else:
+            current_text = self.translated_srt_editor.toPlainText().strip()
+            if current_text:
+                try:
+                    resolved_segments = parse_srt_text(current_text, allow_empty_text=True)
+                except ValueError:
+                    resolved_segments = []
+            sequence_number = len(resolved_segments) + 1 if resolved_segments else 1
+
+        return self._missing_segment_block(
+            sequence_number,
+            self._missing_segment_segment(insert_at_index, resolved_segments or None),
+        )
+
+    @staticmethod
+    def _missing_segment_block(sequence_number: int, segment: SubtitleSegment) -> str:
+        text = segment.text.strip()
+        block = (
+            f"{sequence_number}\n"
+            f"{format_srt_timestamp(segment.start_seconds)} --> {format_srt_timestamp(segment.end_seconds)}"
+        )
+        if text:
+            return f"{block}\n{text}"
+        return block
+
+    def _missing_segment_segment(
+        self,
+        insert_at_index: int | None = None,
+        parsed_segments: list[SubtitleSegment] | None = None,
+    ) -> SubtitleSegment:
+        segments = list(parsed_segments or [])
+        if not segments and self._current_transcription is not None and self._current_transcription.review_segments:
+            segments = [
+                SubtitleSegment(
+                    start_seconds=segment.start_seconds,
+                    end_seconds=segment.end_seconds,
+                    text=segment.translated_text,
+                )
+                for segment in self._current_transcription.review_segments
+            ]
+
+        if not segments:
+            return SubtitleSegment(0.0, 1.5, self._missing_segment_placeholder())
+
+        if insert_at_index is None:
+            insert_at_index = len(segments)
+        insert_at_index = max(0, min(insert_at_index, len(segments)))
+
+        previous_segment = segments[insert_at_index - 1] if insert_at_index > 0 else None
+        next_segment = segments[insert_at_index] if insert_at_index < len(segments) else None
+
+        if previous_segment is not None:
+            start_seconds = previous_segment.end_seconds
+        elif next_segment is not None:
+            start_seconds = max(0.0, next_segment.start_seconds - 1.5)
+        else:
+            start_seconds = 0.0
+
+        if next_segment is not None and next_segment.start_seconds > start_seconds:
+            end_seconds = next_segment.start_seconds
+        else:
             end_seconds = start_seconds + 1.5
 
-        return (
-            f"{next_index}\n"
-            f"{format_srt_timestamp(start_seconds)} --> {format_srt_timestamp(end_seconds)}\n"
-            "[Add missing subtitle text here]"
+        return SubtitleSegment(
+            start_seconds=start_seconds,
+            end_seconds=max(end_seconds, start_seconds + 0.01),
+            text=self._missing_segment_placeholder(),
         )
+
+    @staticmethod
+    def _missing_segment_insert_index(srt_text: str, cursor_position: int) -> int:
+        spans = MainWindow._srt_block_spans(srt_text)
+        for index, (start, end) in enumerate(spans):
+            if cursor_position <= start:
+                return index
+            if start < cursor_position <= end:
+                return index + 1
+        return len(spans)
+
+    @staticmethod
+    def _srt_block_spans(srt_text: str) -> list[tuple[int, int]]:
+        spans: list[tuple[int, int]] = []
+        cursor = 0
+        separator_pattern = re.compile(r"(?:\r?\n){2,}")
+        for match in separator_pattern.finditer(srt_text):
+            block_start = cursor
+            block_end = match.start()
+            while block_start < block_end and srt_text[block_start] in "\r\n":
+                block_start += 1
+            while block_end > block_start and srt_text[block_end - 1] in "\r\n":
+                block_end -= 1
+            if block_start < block_end and srt_text[block_start:block_end].strip():
+                spans.append((block_start, block_end))
+            cursor = match.end()
+
+        block_start = cursor
+        block_end = len(srt_text)
+        while block_start < block_end and srt_text[block_start] in "\r\n":
+            block_start += 1
+        while block_end > block_start and srt_text[block_end - 1] in "\r\n":
+            block_end -= 1
+        if block_start < block_end and srt_text[block_start:block_end].strip():
+            spans.append((block_start, block_end))
+        return spans
+
+    def _focus_missing_segment_placeholder(self, block_text: str) -> None:
+        full_text = self.translated_srt_editor.toPlainText()
+        placeholder = self._missing_segment_placeholder()
+        block_position = full_text.find(block_text)
+        placeholder_position = full_text.rfind(placeholder)
+        if block_position != -1:
+            placeholder_offset = block_text.find(placeholder)
+            if placeholder_offset != -1:
+                placeholder_position = block_position + placeholder_offset
+
+        self.translated_srt_editor.setFocus()
+        if placeholder_position == -1:
+            return
+
+        cursor = self.translated_srt_editor.textCursor()
+        cursor.setPosition(placeholder_position)
+        cursor.setPosition(
+            placeholder_position + len(placeholder),
+            QTextCursor.MoveMode.KeepAnchor,
+        )
+        self.translated_srt_editor.setTextCursor(cursor)
 
     def _start_finalize(self, srt_text: str) -> None:
         assert self._current_options is not None
@@ -1629,7 +1775,7 @@ class MainWindow(QMainWindow):
             f"Translation provider: {metadata.translation_provider or 'Not used'}",
             f"Segments: {len(result.review_segments)}",
             f"Model / engine: {self.whisper_model_combo.currentData()} on {metadata.device_label or 'unknown'}",
-            "Review note: keep the original timed blocks, but you can insert extra SRT blocks for missed subtitles.",
+            "Review note: keep the original timed blocks, insert extra SRT blocks for missed subtitles, and leave a block blank when no caption is needed.",
         ]
         if metadata.stage_durations:
             stage_order = ("audio_extraction_seconds", "whisper_seconds", "translation_seconds")

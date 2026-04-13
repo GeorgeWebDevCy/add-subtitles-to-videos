@@ -78,7 +78,30 @@ def translation_segments_to_srt_text(
     )
 
 
-def parse_srt_text(srt_text: str) -> list[SubtitleSegment]:
+def segments_to_plain_srt_text(
+    segments: Iterable[SubtitleSegment],
+    *,
+    include_empty_text: bool = False,
+) -> str:
+    return _blocks_to_srt_text(
+        [
+            SubtitleSegment(
+                start_seconds=segment.start_seconds,
+                end_seconds=segment.end_seconds,
+                text=segment.text,
+            )
+            for segment in segments
+        ],
+        preserve_text=True,
+        include_empty_text=include_empty_text,
+    )
+
+
+def parse_srt_text(
+    srt_text: str,
+    *,
+    allow_empty_text: bool = False,
+) -> list[SubtitleSegment]:
     if not srt_text.strip():
         return []
 
@@ -86,12 +109,13 @@ def parse_srt_text(srt_text: str) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
 
     for index, block in enumerate(blocks, start=1):
-        lines = [line.rstrip() for line in block.splitlines() if line.strip()]
-        if len(lines) < 3:
+        lines = [line.rstrip() for line in block.splitlines()]
+        if len(lines) < 2:
             raise ValueError(f"Subtitle block {index} is incomplete.")
 
-        timestamp_line = lines[1] if lines[0].isdigit() else lines[0]
-        text_lines = lines[2:] if lines[0].isdigit() else lines[1:]
+        has_sequence = lines[0].strip().isdigit()
+        timestamp_line = lines[1].strip() if has_sequence else lines[0].strip()
+        text_lines = lines[2:] if has_sequence else lines[1:]
 
         if "-->" not in timestamp_line:
             raise ValueError(f"Subtitle block {index} is missing a timestamp line.")
@@ -102,8 +126,8 @@ def parse_srt_text(srt_text: str) -> list[SubtitleSegment]:
         if end_seconds < start_seconds:
             raise ValueError(f"Subtitle block {index} ends before it starts.")
 
-        text = "\n".join(text_lines).strip()
-        if not text:
+        text = _preserve_subtitle_text("\n".join(text_lines))
+        if not text and not allow_empty_text:
             raise ValueError(f"Subtitle block {index} does not contain subtitle text.")
 
         segments.append(
@@ -122,7 +146,7 @@ def validate_review_srt_text(
     reference_segments: Iterable[TranslationSegment],
 ) -> str | None:
     try:
-        parsed_segments = parse_srt_text(srt_text)
+        parsed_segments = parse_srt_text(srt_text, allow_empty_text=True)
     except ValueError as exc:
         return str(exc)
 
@@ -179,16 +203,33 @@ def parse_srt_timestamp(value: str) -> float:
 def _blocks_to_srt_text(
     segments: list[SubtitleSegment],
     *,
-    max_line_length: int,
+    max_line_length: int | None = None,
+    preserve_text: bool = False,
+    include_empty_text: bool = False,
 ) -> str:
     blocks: list[str] = []
     sequence = 0
     for segment in segments:
-        text = wrap_subtitle_text(segment.text, max_line_length).strip()
-        if not text:
+        text = _preserve_subtitle_text(segment.text) if preserve_text else wrap_subtitle_text(
+            segment.text,
+            max_line_length or 1,
+        ).strip()
+        if not text and not include_empty_text:
             continue
         sequence += 1
         start = format_srt_timestamp(segment.start_seconds)
         end = format_srt_timestamp(max(segment.end_seconds, segment.start_seconds + 0.01))
-        blocks.append(f"{sequence}\n{start} --> {end}\n{text}")
+        if text:
+            blocks.append(f"{sequence}\n{start} --> {end}\n{text}")
+        else:
+            blocks.append(f"{sequence}\n{start} --> {end}")
     return "\n\n".join(blocks) + "\n" if blocks else ""
+
+
+def _preserve_subtitle_text(text: str) -> str:
+    lines = [line.rstrip() for line in text.splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines).strip()

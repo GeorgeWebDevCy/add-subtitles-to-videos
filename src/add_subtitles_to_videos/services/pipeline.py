@@ -200,7 +200,7 @@ class SubtitlePipeline:
             raise RuntimeError(validation_error)
 
         write_started_at = perf_counter()
-        translated_segments = parse_srt_text(srt_text)
+        translated_segments = parse_srt_text(srt_text, allow_empty_text=True)
         video_path = transcription.input_video
         output_directory = options.output_directory.expanduser().resolve()
         output_directory.mkdir(parents=True, exist_ok=True)
@@ -275,7 +275,8 @@ class SubtitlePipeline:
     @staticmethod
     def _build_preview_text(segments: list[SubtitleSegment]) -> str:
         preview_lines: list[str] = []
-        for index, segment in enumerate(segments[:5], start=1):
+        preview_segments = [segment for segment in segments if segment.text.strip()]
+        for index, segment in enumerate(preview_segments[:5], start=1):
             preview_lines.append(f"{index}. {segment.text.replace(chr(10), ' ')}")
         return "\n".join(preview_lines)
 

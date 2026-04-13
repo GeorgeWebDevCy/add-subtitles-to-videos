@@ -109,6 +109,7 @@ def _run_ffmpeg(
         stderr=subprocess.PIPE,
         text=True,
         bufsize=1,
+        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
     )
     stderr_tail: deque[str] = deque(maxlen=24)
     stderr_thread = _start_stderr_reader(process, stderr_tail)

@@ -47,6 +47,7 @@ def current_gpu_snapshot() -> GpuSnapshot | None:
             text=True,
             timeout=2,
             check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
         )
     except OSError:
         response = None

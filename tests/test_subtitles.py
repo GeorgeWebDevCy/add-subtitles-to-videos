@@ -453,6 +453,22 @@ def test_parse_srt_text_round_trips_translated_segments() -> None:
     assert parsed[1].start_seconds == 2.0
 
 
+def test_parse_srt_text_can_allow_blank_blocks() -> None:
+    srt = (
+        "1\n00:00:00,000 --> 00:00:01,500\nAlpha\n\n"
+        "2\n00:00:02,000 --> 00:00:03,500\n\n"
+        "3\n00:00:04,000 --> 00:00:05,500\nBeta\n"
+    )
+
+    with pytest.raises(ValueError, match="does not contain subtitle text"):
+        parse_srt_text(srt)
+
+    parsed = parse_srt_text(srt, allow_empty_text=True)
+
+    assert [segment.text for segment in parsed] == ["Alpha", "", "Beta"]
+    assert parsed[1].start_seconds == 2.0
+
+
 def test_validate_review_srt_rejects_timing_changes() -> None:
     reference = [
         TranslationSegment(0.0, 1.0, "γειά", "hello"),
@@ -475,6 +491,19 @@ def test_validate_review_srt_allows_inserted_missing_blocks() -> None:
         "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n"
         "2\n00:00:00,400 --> 00:00:00,800\n[missing line added]\n\n"
         "3\n00:00:01,000 --> 00:00:02,000\nthere\n"
+    )
+
+    assert validate_review_srt_text(valid_srt, reference) is None
+
+
+def test_validate_review_srt_allows_blank_original_blocks() -> None:
+    reference = [
+        TranslationSegment(0.0, 1.0, "hello source", "hello"),
+        TranslationSegment(1.0, 2.0, "there source", "there"),
+    ]
+    valid_srt = (
+        "1\n00:00:00,000 --> 00:00:01,000\n\n"
+        "2\n00:00:01,000 --> 00:00:02,000\nthere\n"
     )
 
     assert validate_review_srt_text(valid_srt, reference) is None
@@ -742,6 +771,23 @@ def test_pipeline_finalize_writes_target_language_srt(tmp_path) -> None:
     assert subtitle_file.exists()
     assert result.segment_count == 2
     assert "hello" in result.preview_text
+
+
+def test_pipeline_finalize_allows_blank_review_blocks(tmp_path) -> None:
+    video_path = tmp_path / "video.mp4"
+    transcription = _transcription_result(video_path)
+    options = _options(tmp_path, source_language="el", target_language="en")
+    pipeline = SubtitlePipeline()
+    srt_text = (
+        "1\n00:00:00,000 --> 00:00:01,000\n\n"
+        "2\n00:00:01,100 --> 00:00:02,000\nhow are you\n"
+    )
+
+    result = pipeline.finalize(transcription, srt_text, options)
+
+    assert result.segment_count == 2
+    assert result.preview_text == "1. how are you"
+    assert (tmp_path / "video.en.srt").read_text(encoding="utf-8") == srt_text
 
 
 def test_pipeline_logs_stage_timings_for_transcribe_and_finalize(tmp_path) -> None:
@@ -1139,6 +1185,31 @@ def test_main_window_can_insert_missing_segment_template(monkeypatch, tmp_path) 
     updated_text = window.translated_srt_editor.toPlainText()
     assert "[Add missing subtitle text here]" in updated_text
     assert "3\n00:00:02,000 --> 00:00:03,500" in updated_text
+
+    window._on_cancelled("Processing stopped by user.")
+    window.close()
+
+
+def test_main_window_inserts_missing_segment_at_cursor_and_renumbers(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+
+    window = main_window_module.MainWindow()
+    video_path = tmp_path / "demo.mp4"
+    window._show_review(_transcription_result(video_path), 0)
+
+    cursor = window.translated_srt_editor.textCursor()
+    cursor.setPosition(window.translated_srt_editor.toPlainText().find("2\n00:00:01,100 --> 00:00:02,000"))
+    window.translated_srt_editor.setTextCursor(cursor)
+
+    window._on_insert_missing_segment_clicked()
+
+    assert window.translated_srt_editor.toPlainText() == (
+        "1\n00:00:00,000 --> 00:00:01,000\nhello\n\n"
+        "2\n00:00:01,000 --> 00:00:01,100\n[Add missing subtitle text here]\n\n"
+        "3\n00:00:01,100 --> 00:00:02,000\nhow are you\n"
+    )
+    assert window.translated_srt_editor.textCursor().selectedText() == "[Add missing subtitle text here]"
 
     window._on_cancelled("Processing stopped by user.")
     window.close()
