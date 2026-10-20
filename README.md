@@ -27,6 +27,19 @@ Review workflow:
 
 ## Launch Languages
 
+For reels with Greek and English speech, choose **Mixed Greek and English** as
+the source. Choose **Opposite language (Greek ↔ English)** as the target for
+Greek speech → English subtitles and English speech → Greek subtitles in one
+SRT/video. Selecting this target also selects the mixed source automatically.
+For mixed speech with English-only subtitles, keep the mixed source and choose
+**English** as the target. Mixed transcription uses faster-whisper on CPU or CUDA.
+Review every language switch before export, including each phrase in blocks
+containing both languages. Recognition and translation can still need correction.
+
+For the Centredot reels: process `Chefs.mov` with the opposite-language target,
+then process the other two videos in a separate run with the English target.
+Choose **Generate SRT and burned-in video** to export captioned reels.
+
 - English
 - Greek
 - Turkish

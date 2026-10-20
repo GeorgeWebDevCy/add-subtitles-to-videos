@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(start pythonw:*)",
+      "Bash(ls -d .worktrees)",
+      "Bash(ls -d worktrees)",
+      "Bash(\"../../.venv/Scripts/python\" -m pytest tests/ -v)",
+      "Bash(../../.venv/Scripts/python -m pytest tests/test_models.py tests/test_subtitles.py -v)",
+      "Bash(find \"D:/GitHub Projects/add-subtitles-to-videos/.worktrees/transcription-speed-core/src\" -name \"*.pyc\" -delete)",
+      "Bash(../../.venv/Scripts/python -m pytest tests/test_models.py -v)",
+      "Bash(../../.venv/Scripts/python -c \"import add_subtitles_to_videos.models as m; import inspect; print\\(inspect.getfile\\(m\\)\\); print\\([f.name for f in m.ProcessingOptions.__dataclass_fields__.values\\(\\)]\\)\")",
+      "Bash(../../.venv/Scripts/pip show:*)",
+      "Bash(\"D:/GitHub Projects/add-subtitles-to-videos/.venv/Scripts/pip\" show add-subtitles-to-videos)",
+      "Bash(\"../../.venv/Scripts/pip.exe\" show:*)",
+      "Bash(\"D:/GitHub Projects/add-subtitles-to-videos/.venv/Scripts/python.exe\" -m pip show add-subtitles-to-videos)",
+      "Bash(\"../../.venv/Scripts/python.exe\" -c \"import sys; sys.path.insert\\(0, 'src'\\); import add_subtitles_to_videos.models as m; import inspect; print\\(inspect.getfile\\(m\\)\\)\")",
+      "Bash(\"../../.venv/Scripts/python.exe\" -m pytest tests/test_models.py tests/test_subtitles.py -v)",
+      "Bash(python -m pytest tests/test_models.py -v)",
+      "Bash(python -m pytest --tb=no -q)",
+      "Bash(../../.venv/Scripts/python -m pytest tests/test_config.py -v)",
+      "Bash(../../.venv/Scripts/python -m pytest tests/ -v)",
+      "Bash(python -c ':*)"
+    ]
+  }
+}

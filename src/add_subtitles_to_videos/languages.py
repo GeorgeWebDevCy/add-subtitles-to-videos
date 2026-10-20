@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 
 AUTO_LANGUAGE_CODE = "auto"
+MIXED_LANGUAGE_CODE = "mixed_el_en"
+OPPOSITE_LANGUAGE_CODE = "opposite_el_en"
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,20 +31,24 @@ LAUNCH_LANGUAGES: tuple[LanguageOption, ...] = (
 
 
 AUTO_LANGUAGE = LanguageOption(AUTO_LANGUAGE_CODE, "Auto detect")
+MIXED_LANGUAGE = LanguageOption(MIXED_LANGUAGE_CODE, "Mixed Greek and English")
+OPPOSITE_LANGUAGE = LanguageOption(OPPOSITE_LANGUAGE_CODE, "Opposite language (Greek ↔ English)")
 
 
 LANGUAGE_BY_CODE: dict[str, LanguageOption] = {
     AUTO_LANGUAGE.code: AUTO_LANGUAGE,
+    MIXED_LANGUAGE.code: MIXED_LANGUAGE,
+    OPPOSITE_LANGUAGE.code: OPPOSITE_LANGUAGE,
     **{language.code: language for language in LAUNCH_LANGUAGES},
 }
 
 
 def source_language_options() -> tuple[LanguageOption, ...]:
-    return (AUTO_LANGUAGE, *LAUNCH_LANGUAGES)
+    return (AUTO_LANGUAGE, *LAUNCH_LANGUAGES, MIXED_LANGUAGE)
 
 
 def target_language_options() -> tuple[LanguageOption, ...]:
-    return LAUNCH_LANGUAGES
+    return (*LAUNCH_LANGUAGES, OPPOSITE_LANGUAGE)
 
 
 def language_label(code: str | None) -> str:

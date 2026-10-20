@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
-from ..languages import language_label
+from ..languages import language_label, MIXED_LANGUAGE_CODE, OPPOSITE_LANGUAGE_CODE
 from ..models import (
     OutputMode,
     PipelineResult,
@@ -112,6 +112,8 @@ class SubtitlePipeline:
             stage_durations.update(metadata.stage_durations)
 
         effective_source_language = metadata.detected_language or options.source_language or "unknown"
+        if options.source_language == MIXED_LANGUAGE_CODE or options.target_language == OPPOSITE_LANGUAGE_CODE:
+            effective_source_language = MIXED_LANGUAGE_CODE
         translation_applied = options.target_language != effective_source_language
         metadata.target_language = options.target_language
 
@@ -287,11 +289,20 @@ class SubtitlePipeline:
         metadata: TranscriptionMetadata,
     ) -> tuple[str, ...]:
         warnings: list[str] = []
+        mixed = options.source_language == MIXED_LANGUAGE_CODE or options.target_language == OPPOSITE_LANGUAGE_CODE
+        if mixed:
+            warnings.append(
+                "Mixed Greek/English speech: check every language switch in the source transcript. "
+                "For a subtitle block containing both languages, check each phrase uses the intended subtitle language."
+            )
+        if options.target_language == OPPOSITE_LANGUAGE_CODE:
+            warnings.append("Check Greek speech has English subtitles and English speech has Greek subtitles.")
         detected_language = metadata.detected_language
         effective_source = detected_language or options.source_language
 
         if (
             options.source_language
+            and not mixed
             and options.source_language != "auto"
             and detected_language
             and options.source_language != detected_language

@@ -52,7 +52,7 @@ from ..config import (
     VIDEO_FILE_FILTER,
     WHISPER_MODEL_OPTIONS,
 )
-from ..languages import language_label
+from ..languages import language_label, MIXED_LANGUAGE_CODE, OPPOSITE_LANGUAGE_CODE
 from ..models import OutputMode, PipelineResult, ProcessingOptions, SubtitleSegment, TranscriptionResult
 from ..services import OperationCancelledError, ffmpeg
 from ..services.gpu import current_gpu_snapshot
@@ -888,7 +888,7 @@ class MainWindow(QMainWindow):
         source_language = self.source_language_combo.currentData()
         if (
             self._translation_required_from_choices()
-            and source_language != "auto"
+            and (source_language != "auto" or self.target_language_combo.currentData() == OPPOSITE_LANGUAGE_CODE)
             and not translation_service.is_configured()
         ):
             QMessageBox.warning(self, APP_NAME, translation_service.configuration_status())
@@ -2024,6 +2024,10 @@ class MainWindow(QMainWindow):
         self._append_log(f"Whisper warmup failed: {error_message}")
 
     def _refresh_translation_status(self) -> None:
+        if self.target_language_combo.currentData() == OPPOSITE_LANGUAGE_CODE:
+            if self.source_language_combo.currentData() != MIXED_LANGUAGE_CODE:
+                self._select_combo_value(self.source_language_combo, MIXED_LANGUAGE_CODE)
+                return
         service = self._build_translation_service()
         if not self._translation_required_from_choices():
             self.translation_status_label.setText(

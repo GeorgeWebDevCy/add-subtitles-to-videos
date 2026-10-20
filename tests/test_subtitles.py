@@ -392,7 +392,7 @@ def test_language_catalog_matches_launch_plan() -> None:
     source_codes = [language.code for language in source_language_options()]
     target_codes = [language.code for language in target_language_options()]
 
-    assert source_codes == [
+    assert source_codes[:-1] == [
         "auto",
         "en",
         "el",
@@ -407,7 +407,9 @@ def test_language_catalog_matches_launch_plan() -> None:
         "pl",
         "cs",
     ]
-    assert target_codes == source_codes[1:]
+    assert source_codes[-1] == "mixed_el_en"
+    assert target_codes[:-1] == source_codes[1:-1]
+    assert target_codes[-1] == "opposite_el_en"
 
 
 def test_format_srt_timestamp_rounds_to_milliseconds() -> None:
@@ -682,6 +684,104 @@ def test_pipeline_transcribe_runs_translation_and_preserves_timing(tmp_path) -> 
     assert result.review_segments[0].start_seconds == 0.0
     assert result.review_segments[1].end_seconds == 2.0
     assert "DE: γειά" in result.translated_srt_text
+
+
+@pytest.mark.parametrize("target", ["en", "opposite_el_en"])
+def test_mixed_pipeline_always_translates_even_when_dominant_language_matches(tmp_path, target):
+    segments = [SubtitleSegment(0, 1, "Hello"), SubtitleSegment(1, 2, "Καλημέρα")]
+    whisper = MagicMock()
+    whisper.transcribe.return_value = (
+        segments, TranscriptionMetadata(detected_language="en", detected_language_probability=0.99)
+    )
+    translator = FakeTranslationService()
+    with patch.object(ffmpeg_module, "extract_audio"), patch.object(ffmpeg_module, "ffmpeg_binary"):
+        result = SubtitlePipeline(whisper, translator).transcribe(
+            tmp_path / "Chefs.mov",
+            _options(tmp_path, source_language="mixed_el_en", target_language=target),
+        )
+    assert translator.calls == [("mixed_el_en", target, ["Hello", "Καλημέρα"])]
+    assert result.metadata.translation_applied
+    assert [(s.start_seconds, s.end_seconds) for s in result.review_segments] == [(0, 1), (1, 2)]
+    assert any("language switch" in warning for warning in result.warning_messages)
+
+
+def test_opposite_translation_request_and_export_preserve_order_and_timing(tmp_path):
+    import json
+    from add_subtitles_to_videos.languages import language_label
+
+    service = OpenAICompatibleTranslationService(
+        TranslationProviderConfig("https://example.test/v1", "test-key", "test-model")
+    )
+    session = MagicMock()
+    session.post.return_value.status_code = 200
+    def respond(*args, **kwargs):
+        request = json.loads(kwargs['json']['messages'][1]['content'])
+        response = MagicMock()
+        response.status_code = 200
+        text = 'Hello' if request['target_language'] == 'English' else 'Καλημέρα'
+        response.json.return_value = {'choices': [{'message': {'content': json.dumps(
+            {'translations': [{'text': text}]}
+        )}}]}
+        return response
+    session.post.side_effect = respond
+    with patch.object(service, "_session", return_value=session):
+        translated = service.translate_segments(
+            [SubtitleSegment(0, 1, "Good morning"), SubtitleSegment(1, 2, "Γεια")],
+            source_language="mixed_el_en", target_language="opposite_el_en",
+        )
+    request = json.loads(session.post.call_args.kwargs["json"]["messages"][1]["content"])
+    requests = [json.loads(call.kwargs['json']['messages'][1]['content']) for call in session.post.call_args_list]
+    assert [(r['source_language'], r['target_language']) for r in requests] == [('Greek', 'English'), ('English', 'Greek')]
+    assert [s.translated_text for s in translated] == ["Καλημέρα", "Hello"]
+    transcription = _transcription_result(tmp_path / "Chefs.mov")
+    transcription.review_segments = translated
+    result = SubtitlePipeline().finalize(
+        transcription, translation_segments_to_srt_text(translated, text_field="translated_text", max_line_length=42),
+        _options(tmp_path, target_language="opposite_el_en"),
+    )
+    assert result.subtitle_file.name == "Chefs.opposite_el_en.srt"
+    assert "Καλημέρα" in result.subtitle_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("source,target", [("mixed_el_en", "en"), ("el", "opposite_el_en")])
+def test_mixed_whisper_detects_language_per_segment(tmp_path, source, target):
+    service = WhisperService()
+    model = MagicMock()
+    model.transcribe.return_value = ([], type("Info", (), {"language": "en"})())
+    with patch.object(service, "_preferred_device", return_value="cpu"), patch.object(
+        service, "_backend_name", return_value="faster-whisper"
+    ), patch.object(service, "_get_model", return_value=model), patch.object(
+        service, "_transcribe_mixed_language", return_value=([], TranscriptionMetadata(None, None))
+    ) as mixed:
+        service.transcribe(tmp_path / "audio.wav", _options(tmp_path, source_language=source, target_language=target))
+    mixed.assert_called_once()
+    model.transcribe.assert_not_called()
+
+
+def test_mixed_transcription_constrains_languages_and_preserves_offsets(tmp_path):
+    import numpy as np
+    from types import SimpleNamespace
+    model = MagicMock()
+    model.detect_language.side_effect = [
+        ('pl', 0.7, [('pl', 0.7), ('en', 0.2), ('el', 0.1)]),
+        ('el', 0.9, [('el', 0.9), ('en', 0.1)]),
+    ]
+    model.transcribe.side_effect = [
+        ([SimpleNamespace(start=0.1, end=0.8, text='Hello')], None),
+        ([SimpleNamespace(start=0.2, end=0.9, text='Γεια')], None),
+    ]
+    service = WhisperService()
+    with patch.object(service, '_read_pcm_wave', return_value=np.zeros(48000)), patch(
+        'faster_whisper.vad.get_speech_timestamps',
+        return_value=[{'start': 0, 'end': 16000}, {'start': 32000, 'end': 48000}],
+    ):
+        segments, metadata = service._transcribe_mixed_language(
+            model, tmp_path / 'audio.wav', log=None, cancel_requested=None,
+        )
+    assert [c.kwargs['language'] for c in model.transcribe.call_args_list] == ['en', 'el']
+    assert segments[1].start_seconds == 2.2
+    assert segments[1].end_seconds == 2.9
+    assert metadata.detected_language == 'mixed_el_en'
 
 
 def test_worker_serialization_accepts_strenum_like_strings(tmp_path) -> None:
@@ -1060,8 +1160,11 @@ def test_main_window_shows_launch_languages_and_missing_key_status(monkeypatch) 
     source_items = [window.source_language_combo.itemData(i) for i in range(window.source_language_combo.count())]
     target_items = [window.target_language_combo.itemData(i) for i in range(window.target_language_combo.count())]
 
-    assert source_items == ["auto", "en", "el", "tr", "de", "fr", "it", "es", "pt", "nl", "ro", "pl", "cs"]
-    assert target_items == ["en", "el", "tr", "de", "fr", "it", "es", "pt", "nl", "ro", "pl", "cs"]
+    assert source_items == ["auto", "en", "el", "tr", "de", "fr", "it", "es", "pt", "nl", "ro", "pl", "cs", "mixed_el_en"]
+    assert target_items == ["en", "el", "tr", "de", "fr", "it", "es", "pt", "nl", "ro", "pl", "cs", "opposite_el_en"]
+    window.target_language_combo.setCurrentIndex(window.target_language_combo.findData("opposite_el_en"))
+    assert window.source_language_combo.currentData() == "mixed_el_en"
+    assert window._translation_required_from_choices()
     assert "missing API key" in window.translation_status_label.text()
     window.close()
 

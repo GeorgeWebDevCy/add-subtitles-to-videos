@@ -17,6 +17,7 @@ import whisper
 from . import OperationCancelledError
 from .gpu import current_gpu_snapshot, format_gpu_snapshot
 from ..models import ProcessingOptions, SubtitleSegment, TranscriptionMetadata
+from ..languages import MIXED_LANGUAGE_CODE, OPPOSITE_LANGUAGE_CODE
 
 LogReporter = Callable[[str], None]
 CancelChecker = Callable[[], bool]
@@ -39,10 +40,16 @@ class WhisperService:
         started_at = perf_counter()
         self._check_cancel(cancel_requested)
         source_language = None
-        if options.source_language and options.source_language != "auto":
+        multilingual = (
+            options.source_language == MIXED_LANGUAGE_CODE
+            or options.target_language == OPPOSITE_LANGUAGE_CODE
+        )
+        if options.source_language and options.source_language != "auto" and not multilingual:
             source_language = options.source_language
         device = self._preferred_device()
         backend = self._backend_name(device)
+        if multilingual and backend != "faster-whisper":
+            raise RuntimeError("Mixed-language transcription requires faster-whisper on CPU or CUDA.")
 
         cache_key = (options.whisper_model, device, backend)
         load_message = "Reusing" if cache_key in self._model_cache else "Loading"
@@ -58,11 +65,14 @@ class WhisperService:
         self._check_cancel(cancel_requested)
         self._emit_gpu_snapshot(log, "CUDA before inference")
         if backend == "faster-whisper":
-            items, metadata = self._transcribe_with_faster_whisper(
-                model,
-                audio_path,
-                source_language=source_language,
-            )
+            if multilingual:
+                items, metadata = self._transcribe_mixed_language(
+                    model, audio_path, log=log, cancel_requested=cancel_requested,
+                )
+            else:
+                items, metadata = self._transcribe_with_faster_whisper(
+                    model, audio_path, source_language=source_language,
+                )
         else:
             items, metadata = self._transcribe_with_openai_whisper(
                 model,
@@ -150,12 +160,14 @@ class WhisperService:
         audio_path: Path,
         *,
         source_language: str | None,
+        multilingual: bool = False,
     ) -> tuple[list[SubtitleSegment], TranscriptionMetadata]:
         segments, info = model.transcribe(
             str(audio_path),
             language=source_language,
             task="transcribe",
             condition_on_previous_text=False,
+            **({"multilingual": True} if multilingual else {}),
         )
 
         items: list[SubtitleSegment] = []
@@ -177,6 +189,57 @@ class WhisperService:
             duration_seconds=getattr(info, "duration", None),
         )
         return items, metadata
+
+    def _transcribe_mixed_language(
+        self, model: Any, audio_path: Path, *, log: LogReporter | None,
+        cancel_requested: CancelChecker | None,
+    ) -> tuple[list[SubtitleSegment], TranscriptionMetadata]:
+        from faster_whisper.vad import get_speech_timestamps, VadOptions
+
+        audio = self._read_pcm_wave(audio_path)
+        spans = get_speech_timestamps(audio, vad_options=VadOptions(
+            max_speech_duration_s=12, min_silence_duration_ms=350, speech_pad_ms=200,
+        ))
+        items: list[SubtitleSegment] = []
+        for index, span in enumerate(spans, 1):
+            self._check_cancel(cancel_requested)
+            chunk = audio[span['start']:span['end']]
+            _, _, probabilities = model.detect_language(chunk)
+            language = max(
+                ((code, probability) for code, probability in probabilities if code in {'el', 'en'}),
+                key=lambda pair: pair[1],
+            )[0]
+            self._emit_log(log, f"Speech section {index}/{len(spans)}: {language}")
+            segments, _ = model.transcribe(
+                chunk, language=language, task='transcribe',
+                condition_on_previous_text=False, word_timestamps=True,
+            )
+            offset = span['start'] / 16000
+            for segment in segments:
+                text = str(segment.text).strip()
+                if text:
+                    words = getattr(segment, 'words', None)
+                    if words:
+                        group = []
+                        for word in words:
+                            if group and (len(''.join(w.word for w in group)) + len(word.word) > 64
+                                          or word.end - group[0].start > 5):
+                                items.append(SubtitleSegment(offset + group[0].start, offset + group[-1].end,
+                                                             ''.join(w.word for w in group).strip()))
+                                group = []
+                            group.append(word)
+                        if group:
+                            items.append(SubtitleSegment(offset + group[0].start, offset + group[-1].end,
+                                                         ''.join(w.word for w in group).strip()))
+                    else:
+                        items.append(SubtitleSegment(
+                            start_seconds=offset + float(segment.start),
+                            end_seconds=min(offset + float(segment.end), len(audio) / 16000), text=text,
+                        ))
+        return items, TranscriptionMetadata(
+            detected_language=MIXED_LANGUAGE_CODE, detected_language_probability=None,
+            duration_seconds=len(audio) / 16000,
+        )
 
     def _transcribe_with_openai_whisper(
         self,

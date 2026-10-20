@@ -13,7 +13,7 @@ import requests
 
 from ..config import DEFAULT_MAX_PARALLEL_TRANSLATION_BATCHES
 
-from ..languages import language_label
+from ..languages import language_label, OPPOSITE_LANGUAGE_CODE
 from ..models import SubtitleSegment, TranslationSegment
 from . import OperationCancelledError
 
@@ -131,6 +131,24 @@ class OpenAICompatibleTranslationService(TranslationService):
         cancel_requested: CancelChecker | None = None,
     ) -> list[TranslationSegment]:
         self._ensure_configured()
+        if target_language == OPPOSITE_LANGUAGE_CODE:
+            # Route each cue explicitly so short English phrases cannot be left in English.
+            result: list[TranslationSegment | None] = [None] * len(segments)
+            for source, target in (("el", "en"), ("en", "el")):
+                selected = [
+                    (index, segment) for index, segment in enumerate(segments)
+                    if any('\u0370' <= char <= '\u03ff' or '\u1f00' <= char <= '\u1fff' for char in segment.text)
+                    == (source == 'el')
+                ]
+                if not selected:
+                    continue
+                translated = self.translate_segments(
+                    [segment for _, segment in selected], source_language=source,
+                    target_language=target, log=log, cancel_requested=cancel_requested,
+                )
+                for (index, _), segment in zip(selected, translated, strict=True):
+                    result[index] = segment
+            return [segment for segment in result if segment is not None]
         translated_segments: list[TranslationSegment] = []
         source_label = language_label(source_language)
         target_label = language_label(target_language)
@@ -354,6 +372,19 @@ class OpenAICompatibleTranslationService(TranslationService):
         log: LogReporter | None = None,
     ) -> list[str]:
         endpoint = self._config.base_url.rstrip("/") + "/chat/completions"
+        instruction = (
+            "Translate each subtitle item into subtitle-ready language for the target audience. "
+            "If an item is already in the target language, preserve it. Return JSON only."
+        )
+        if target_label == language_label(OPPOSITE_LANGUAGE_CODE):
+            instruction = (
+                "The source contains both Greek and English speech. Determine the spoken language "
+                "independently for each subtitle item, regardless of the file's dominant language. "
+                "Translate Greek speech into English and English speech into Greek. "
+                "For an item containing both languages, translate each phrase into the opposite "
+                "language, preserving phrase order. Never translate the entire file into one language. "
+                "Preserve one output item per input item and all names and brands. Return JSON only."
+            )
         payload = {
             "model": self._config.model,
             "temperature": 0,
@@ -363,7 +394,7 @@ class OpenAICompatibleTranslationService(TranslationService):
                     "content": (
                         "You are a professional subtitle translator.\n"
                         "\n"
-                        "Translate subtitle text from the source language to the target language.\n"
+                        + instruction + "\n"
                         "\n"
                         "Rules:\n"
                         "- Preserve the exact number of subtitle items.\n"
@@ -385,10 +416,7 @@ class OpenAICompatibleTranslationService(TranslationService):
                         {
                             "source_language": source_label,
                             "target_language": target_label,
-                            "instruction": (
-                                "Translate each subtitle item into subtitle-ready language for the target audience. "
-                                "Return JSON only."
-                            ),
+                            "instruction": instruction,
                             "schema": {"translations": [{"text": "translated subtitle line"}]},
                             "segments": [
                                 {"index": index, "text": segment.text}
