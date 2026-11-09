@@ -1,0 +1,194 @@
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from add_subtitles_to_videos.models import OutputMode, ProcessingOptions, SubtitleSegment, TranscriptionMetadata
+from add_subtitles_to_videos.services import ffmpeg as ffmpeg_module
+from add_subtitles_to_videos.services.media_edit import (
+    keep_segments,
+    parse_time_ranges,
+    parse_timestamp,
+    total_duration,
+)
+from add_subtitles_to_videos.services.pipeline import SubtitlePipeline
+
+CLIENT_CUT_LIST = """
+00:10-00:13
+
+00:28-00:31
+
+00:50-00:59
+
+01:33-02:26
+
+07:09-7:55
+"""
+
+
+def _options(tmp_path: Path, **overrides) -> ProcessingOptions:
+    options = ProcessingOptions(
+        source_language="el",
+        target_language="el",
+        translation_provider=None,
+        whisper_model="base",
+        output_mode=OutputMode.SRT_ONLY,
+        output_directory=tmp_path / "out",
+        max_line_length=42,
+        subtitle_font_size=18,
+    )
+    return replace(options, **overrides)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [("45", 45.0), ("00:10", 10.0), ("7:55", 475.0), ("1:02:03", 3723.0), ("00:10.5", 10.5)],
+)
+def test_parse_timestamp_accepts_common_formats(text, expected) -> None:
+    assert parse_timestamp(text) == expected
+
+
+@pytest.mark.parametrize("text", ["00:75", "1:60:00", "abc", "1::2", "1:2:3:4"])
+def test_parse_timestamp_rejects_bad_times(text) -> None:
+    with pytest.raises(ValueError):
+        parse_timestamp(text)
+
+
+def test_parse_time_ranges_reads_client_cut_list_with_blank_lines() -> None:
+    ranges = parse_time_ranges(CLIENT_CUT_LIST)
+
+    assert ranges == [(10, 13), (28, 31), (50, 59), (93, 146), (429, 475)]
+
+
+def test_parse_time_ranges_sorts_merges_and_accepts_dashes_and_commas() -> None:
+    assert parse_time_ranges("01:00 – 01:10, 00:05-00:08; 01:05 to 01:20") == [(5, 8), (60, 80)]
+
+
+@pytest.mark.parametrize("text", ["00:13-00:10", "00:10", "00:10-", "hello"])
+def test_parse_time_ranges_rejects_bad_entries(text) -> None:
+    with pytest.raises(ValueError):
+        parse_time_ranges(text)
+
+
+def test_parse_time_ranges_empty_text_means_no_cuts() -> None:
+    assert parse_time_ranges("  \n\n ") == []
+
+
+def test_keep_segments_returns_gaps_between_cuts() -> None:
+    keep = keep_segments([(0, 5), (10, 13), (55, 70)], duration=60)
+
+    assert keep == [(5, 10), (13, 55)]
+    assert total_duration(keep) == 47
+
+
+def test_keep_segments_without_cuts_keeps_everything() -> None:
+    assert keep_segments([], duration=30) == [(0, 30)]
+
+
+def test_keep_segments_rejects_cut_after_end_of_media() -> None:
+    with pytest.raises(ValueError, match="after the end"):
+        keep_segments([(100, 110)], duration=60)
+
+
+def test_keep_segments_rejects_removing_everything() -> None:
+    with pytest.raises(ValueError, match="whole recording"):
+        keep_segments([(0, 60)], duration=60)
+
+
+def test_prepare_command_for_video_concats_each_kept_part() -> None:
+    with patch.object(ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"):
+        command = ffmpeg_module.build_prepare_command(
+            Path("in.mov"),
+            Path("out.mp4"),
+            keep=[(0, 10), (13, 60)],
+            audio_only=False,
+            cover_image=None,
+        )
+
+    assert command.count("-i") == 2
+    assert command[command.index("-ss", 6) + 1] == "13.000"
+    graph = command[command.index("-filter_complex") + 1]
+    assert "[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1" in graph
+    assert "-shortest" not in command
+
+
+def test_prepare_command_for_audio_uses_cover_image_and_edited_length() -> None:
+    with patch.object(ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"):
+        command = ffmpeg_module.build_prepare_command(
+            Path("in.mp3"),
+            Path("out.mp4"),
+            keep=[(0, 10), (13, 60)],
+            audio_only=True,
+            cover_image=Path("photo.jpg"),
+        )
+
+    assert command[command.index("-loop") : command.index("-loop") + 6] == [
+        "-loop", "1", "-framerate", "25", "-i", "photo.jpg"
+    ]
+    graph = command[command.index("-filter_complex") + 1]
+    assert "[0:a:0][1:a:0]concat=n=2:v=0:a=1[a]" in graph
+    assert "[2:v]scale=1920:1080" in graph
+    assert command[command.index("-t", command.index("-filter_complex")) + 1] == "57.000"
+
+
+def test_prepare_command_for_audio_without_image_uses_black_picture() -> None:
+    with patch.object(ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"):
+        command = ffmpeg_module.build_prepare_command(
+            Path("in.wav"), Path("out.mp4"), keep=[(0, 5)], audio_only=True, cover_image=None
+        )
+
+    assert "color=c=black:s=1920x1080:r=25" in command
+
+
+def _fake_whisper() -> MagicMock:
+    whisper = MagicMock()
+    whisper.transcribe.return_value = (
+        [SubtitleSegment(0, 1, "α"), SubtitleSegment(1, 2, "β"), SubtitleSegment(2, 3, "γ")],
+        TranscriptionMetadata(detected_language="el", detected_language_probability=None),
+    )
+    return whisper
+
+
+def test_pipeline_cuts_media_first_and_subtitles_the_edited_file(tmp_path) -> None:
+    source = tmp_path / "interview.mp3"
+    options = _options(tmp_path, remove_ranges=((10, 13), (93, 146)), cover_image=tmp_path / "photo.jpg")
+    logs: list[str] = []
+
+    with patch.object(ffmpeg_module, "probe_duration", return_value=300.0), patch.object(
+        ffmpeg_module, "prepare_media"
+    ) as prepare, patch.object(ffmpeg_module, "extract_audio") as extract, patch.object(
+        ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"
+    ):
+        result = SubtitlePipeline(whisper_service=_fake_whisper()).transcribe(source, options, log=logs.append)
+
+    edited = (tmp_path / "out" / "interview.edited.mp4").resolve()
+    prepare.assert_called_once()
+    assert prepare.call_args.kwargs["keep"] == [(0, 10), (13, 93), (146, 300.0)]
+    assert prepare.call_args.kwargs["audio_only"] is True
+    assert prepare.call_args.kwargs["cover_image"] == tmp_path / "photo.jpg"
+    assert extract.call_args.args[0] == edited
+    assert result.input_video == edited
+    assert "media_prepare_seconds" in result.metadata.stage_durations
+    assert any("05:00 -> 04:04 (00:56 removed)" in line for line in logs)
+
+
+def test_pipeline_skips_media_prep_for_video_without_cuts(tmp_path) -> None:
+    with patch.object(ffmpeg_module, "prepare_media") as prepare, patch.object(
+        ffmpeg_module, "extract_audio"
+    ), patch.object(ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"):
+        result = SubtitlePipeline(whisper_service=_fake_whisper()).transcribe(
+            tmp_path / "clip.mov", _options(tmp_path)
+        )
+
+    prepare.assert_not_called()
+    assert result.input_video == (tmp_path / "clip.mov").resolve()
+
+
+def test_pipeline_reports_cut_past_end_with_file_name(tmp_path) -> None:
+    options = _options(tmp_path, remove_ranges=((400, 410),))
+    with patch.object(ffmpeg_module, "probe_duration", return_value=300.0), patch.object(
+        ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"
+    ):
+        with pytest.raises(RuntimeError, match="clip.mov: Cut 06:40-06:50 starts after the end"):
+            SubtitlePipeline(whisper_service=_fake_whisper()).transcribe(tmp_path / "clip.mov", options)

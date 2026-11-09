@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -46,6 +47,128 @@ def extract_audio(
             "pcm_s16le",
             str(audio_path),
         ],
+        cancel_requested=cancel_requested,
+    )
+
+
+_DURATION_PATTERN = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+# Still-image videos are made at this size; photos are fitted inside it with black bars.
+COVER_VIDEO_WIDTH = 1920
+COVER_VIDEO_HEIGHT = 1080
+COVER_VIDEO_FPS = 25
+
+
+def probe_duration(media_path: Path) -> float:
+    """Read the media duration in seconds from FFmpeg's input summary."""
+    completed = subprocess.run(
+        [ffmpeg_binary(), "-hide_banner", "-i", str(media_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+    )
+    match = _DURATION_PATTERN.search(completed.stderr or "")
+    if match is None:
+        raise MediaToolError(f"Couldn't read the duration of {media_path.name}. Is it a valid audio or video file?")
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def build_prepare_command(
+    input_path: Path,
+    output_path: Path,
+    *,
+    keep: list[tuple[float, float]],
+    audio_only: bool,
+    cover_image: Path | None,
+) -> list[str]:
+    """Build an FFmpeg command that joins the kept parts of the input into one MP4.
+
+    Each kept part is opened as its own input with -ss/-t so FFmpeg seeks straight
+    to it, then the parts are joined with the concat filter. For audio input the
+    picture is the cover image (or black) for the length of the edited audio.
+    """
+    command = [ffmpeg_binary(), "-y", "-hide_banner"]
+    for start, end in keep:
+        command += ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", str(input_path)]
+
+    count = len(keep)
+    filters: list[str] = []
+    if audio_only:
+        if cover_image is not None:
+            command += ["-loop", "1", "-framerate", str(COVER_VIDEO_FPS), "-i", str(cover_image)]
+        else:
+            command += [
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c=black:s={COVER_VIDEO_WIDTH}x{COVER_VIDEO_HEIGHT}:r={COVER_VIDEO_FPS}",
+            ]
+        audio_inputs = "".join(f"[{index}:a:0]" for index in range(count))
+        filters.append(f"{audio_inputs}concat=n={count}:v=0:a=1[a]")
+        filters.append(
+            # out_range=tv: JPEG photos are full-range; keep output in the standard range players expect.
+            f"[{count}:v]scale={COVER_VIDEO_WIDTH}:{COVER_VIDEO_HEIGHT}:force_original_aspect_ratio=decrease:out_range=tv,"
+            f"pad={COVER_VIDEO_WIDTH}:{COVER_VIDEO_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            "setsar=1,format=yuv420p[v]"
+        )
+        tune = ["-tune", "stillimage"]
+        # The picture input never ends, so stop at the edited audio length.
+        length = ["-t", f"{sum(end - start for start, end in keep):.3f}"]
+    else:
+        pairs = "".join(f"[{index}:v:0][{index}:a:0]" for index in range(count))
+        filters.append(f"{pairs}concat=n={count}:v=1:a=1[vc][a]")
+        filters.append("[vc]format=yuv420p[v]")
+        tune = []
+        length = []
+
+    command += [
+        "-filter_complex",
+        ";".join(filters),
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+        *tune,
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        *length,
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    return command
+
+
+def prepare_media(
+    input_path: Path,
+    output_path: Path,
+    *,
+    keep: list[tuple[float, float]],
+    audio_only: bool,
+    cover_image: Path | None = None,
+    cancel_requested: CancelChecker | None = None,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    _run_ffmpeg(
+        build_prepare_command(
+            input_path,
+            output_path,
+            keep=keep,
+            audio_only=audio_only,
+            cover_image=cover_image,
+        ),
         cancel_requested=cancel_requested,
     )
 

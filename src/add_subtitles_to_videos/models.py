@@ -25,6 +25,10 @@ class ProcessingOptions:
     max_line_length: int
     subtitle_font_size: int
     workflow_profile: WorkflowProfile = WorkflowProfile.EUROPE_MULTILINGUAL
+    # Time ranges (seconds) to cut out of every file before transcription.
+    remove_ranges: tuple[tuple[float, float], ...] = ()
+    # Picture used when an audio-only file is turned into a video.
+    cover_image: Path | None = None
 
 
 @dataclass(slots=True)

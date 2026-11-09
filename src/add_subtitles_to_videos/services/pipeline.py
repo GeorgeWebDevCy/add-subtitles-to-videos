@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
+from ..config import is_audio_file
 from ..languages import language_label, MIXED_LANGUAGE_CODE, OPPOSITE_LANGUAGE_CODE
 from ..models import (
     OutputMode,
@@ -22,6 +23,7 @@ from .subtitles import (
     translation_segments_to_srt_text,
     validate_review_srt_text,
 )
+from .media_edit import format_clock, keep_segments, total_duration
 from .translation import TranslationService
 from .whisper import WhisperService
 
@@ -75,6 +77,22 @@ class SubtitlePipeline:
     ) -> TranscriptionResult:
         input_video = video_path.expanduser().resolve()
         stage_durations: dict[str, float] = {}
+
+        if options.remove_ranges or is_audio_file(input_video):
+            self._emit(progress, 0.01, "Cutting and preparing media")
+            prepare_started_at = perf_counter()
+            input_video = self._prepare_media(
+                input_video,
+                options,
+                log=log,
+                cancel_requested=cancel_requested,
+            )
+            stage_durations["media_prepare_seconds"] = perf_counter() - prepare_started_at
+            self._emit_log(
+                log,
+                f"Media preparation completed in {stage_durations['media_prepare_seconds']:.2f}s",
+            )
+            self._ensure_not_cancelled(cancel_requested)
 
         self._emit(progress, 0.03, "Preparing audio")
         self._emit_log(log, f"Using FFmpeg binary at {ffmpeg.ffmpeg_binary()}")
@@ -258,6 +276,58 @@ class SubtitlePipeline:
             warning_messages=transcription.warning_messages,
             stage_durations=stage_durations,
         )
+
+    def _prepare_media(
+        self,
+        input_path: Path,
+        options: ProcessingOptions,
+        *,
+        log: LogReporter | None,
+        cancel_requested: CancelChecker | None,
+    ) -> Path:
+        """Cut the requested ranges (and add a picture to audio) into <name>.edited.mp4.
+
+        The edited file is saved in the output folder and replaces the original for
+        the rest of the job, so subtitles line up with the edited timing.
+        """
+        audio_only = is_audio_file(input_path)
+        duration = ffmpeg.probe_duration(input_path)
+        try:
+            keep = keep_segments(list(options.remove_ranges), duration)
+        except ValueError as exc:
+            raise RuntimeError(f"{input_path.name}: {exc}") from None
+
+        output_directory = options.output_directory.expanduser().resolve()
+        output_path = output_directory / f"{input_path.stem}.edited.mp4"
+
+        if options.remove_ranges:
+            removed = duration - total_duration(keep)
+            self._emit_log(
+                log,
+                f"Cutting {len(options.remove_ranges)} range(s) from {input_path.name}: "
+                f"{format_clock(duration)} -> {format_clock(duration - removed)} "
+                f"({format_clock(removed)} removed)",
+            )
+        cover_image = options.cover_image
+        if audio_only:
+            if cover_image is not None:
+                self._emit_log(log, f"Using {cover_image.name} as the video picture")
+            else:
+                self._emit_log(log, "No cover image chosen; the video picture will be black")
+        elif cover_image is not None:
+            self._emit_log(log, "Cover image ignored because this file already has video")
+            cover_image = None
+
+        ffmpeg.prepare_media(
+            input_path,
+            output_path,
+            keep=keep,
+            audio_only=audio_only,
+            cover_image=cover_image,
+            cancel_requested=cancel_requested,
+        )
+        self._emit_log(log, f"Saved edited media to {output_path}")
+        return output_path
 
     @staticmethod
     def _emit(progress: ProgressReporter | None, value: float, message: str) -> None:

@@ -15,6 +15,24 @@ The current release is a Europe-focused multilingual workflow: local Whisper han
 - Optionally burn the subtitles directly into a new video file.
 - Run local transcription with `faster-whisper` by default and a bundled FFmpeg binary while keeping translation text-only.
 
+## Cut & Cover (audio interviews, removing parts)
+
+The **Cut & Cover** card prepares media before transcription:
+
+- **Time ranges to remove**: paste one range per line, e.g. `00:10-00:13` or
+  `1:02:03-1:02:30`. Blank lines are fine, and `7:55` works as well as `07:55`.
+  The card shows how many cuts were read and how much time they remove, or
+  which line is wrong. Cuts apply to every file in the queue.
+- **Audio files** (`.mp3`, `.wav`, `.m4a`, ...) can be added to the queue. They
+  are turned into a 1920×1080 video using the **cover image** (fitted with black
+  bars), or a black picture if no image is chosen.
+
+The edited file is saved in the output folder as `<name>.edited.mp4`, and the
+rest of the job (Whisper, translation, review, burn) runs on it, so subtitle
+times match the edited version. For an audio interview with a photo and a cut
+list: add the audio, paste the cuts, pick the photo, set the target to
+**English**, and choose **Generate SRT and burned-in video**.
+
 ## Screenshots
 
 Main dashboard:

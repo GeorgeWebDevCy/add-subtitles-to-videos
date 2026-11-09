@@ -1916,3 +1916,29 @@ def test_standalone_edit_entry_rejects_wrong_extension(monkeypatch, tmp_path) ->
     assert len(warning_calls) == 1
 
     window.close()
+
+
+def test_main_window_cut_list_status_and_bad_range_blocks_run(monkeypatch, tmp_path) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        main_window_module.QMessageBox, "warning", lambda _parent, _title, text: warnings.append(text)
+    )
+    window = main_window_module.MainWindow()
+    try:
+        assert "No cuts" in window.remove_ranges_status_label.text()
+
+        window.remove_ranges_edit.setPlainText("00:10-00:13\n\n01:33-02:26")
+        assert window.remove_ranges_status_label.text() == "2 cut(s), 00:56 removed in total."
+
+        window.remove_ranges_edit.setPlainText("00:13-00:10")
+        assert "ends before it starts" in window.remove_ranges_status_label.text()
+
+        window._selected_files = [tmp_path / "talk.mp3"]
+        window.output_directory_edit.setText(str(tmp_path))
+        window._start_processing()
+        assert warnings and "Check the time ranges" in warnings[0]
+        assert window._transcription_thread is None
+    finally:
+        window.close()

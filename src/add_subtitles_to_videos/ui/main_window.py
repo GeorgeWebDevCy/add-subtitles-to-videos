@@ -45,6 +45,8 @@ from ..config import (
     DEFAULT_TRANSLATION_MODEL,
     DEFAULT_TRANSLATION_PROVIDER,
     DEFAULT_WHISPER_MODEL,
+    IMAGE_FILE_FILTER,
+    MEDIA_FILE_FILTER,
     OUTPUT_MODE_OPTIONS,
     SOURCE_LANGUAGE_OPTIONS,
     TARGET_LANGUAGE_OPTIONS,
@@ -56,6 +58,7 @@ from ..languages import language_label, MIXED_LANGUAGE_CODE, OPPOSITE_LANGUAGE_C
 from ..models import OutputMode, PipelineResult, ProcessingOptions, SubtitleSegment, TranscriptionResult
 from ..services import OperationCancelledError, ffmpeg
 from ..services.gpu import current_gpu_snapshot
+from ..services.media_edit import format_clock, parse_time_ranges, total_duration
 from ..services.pipeline import SubtitlePipeline
 from ..services.subtitles import (
     format_srt_timestamp,
@@ -369,6 +372,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(16)
         layout.addWidget(self._create_settings_card())
+        layout.addWidget(self._create_media_edit_card())
         layout.addWidget(self._create_output_card())
         layout.addWidget(self._create_run_card())
         layout.addWidget(self._create_summary_card(), stretch=1)
@@ -386,10 +390,10 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(22, 22, 22, 22)
         layout.setSpacing(14)
-        layout.addWidget(self._section_title("Video Queue"))
+        layout.addWidget(self._section_title("Media Queue"))
 
         button_row = QHBoxLayout()
-        self.add_videos_button = QPushButton("Add videos")
+        self.add_videos_button = QPushButton("Add videos or audio")
         self.add_videos_button.clicked.connect(self._choose_videos)
         self.clear_videos_button = QPushButton("Clear list")
         self.clear_videos_button.setObjectName("secondaryButton")
@@ -535,6 +539,71 @@ class MainWindow(QMainWindow):
         hint.setWordWrap(True)
         layout.addWidget(hint)
         return card
+
+    def _create_media_edit_card(self) -> QWidget:
+        card = self._card()
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(22, 22, 22, 22)
+        layout.setSpacing(14)
+        layout.addWidget(self._section_title("Cut & Cover"))
+
+        hint = QLabel(
+            "Optional. List time ranges to remove, one per line (MM:SS-MM:SS or H:MM:SS-H:MM:SS). "
+            "Cuts apply to every file in the queue. Audio files become a video using the cover image "
+            "(black if none). The edited file is saved to the output folder as <name>.edited.mp4 and is what gets subtitled."
+        )
+        hint.setObjectName("supportingText")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.remove_ranges_edit = QPlainTextEdit()
+        self.remove_ranges_edit.setPlaceholderText("00:10-00:13\n01:33-02:26\n07:09-07:55")
+        self.remove_ranges_edit.setFixedHeight(110)
+        self.remove_ranges_edit.textChanged.connect(self._refresh_remove_ranges_status)
+        layout.addWidget(self.remove_ranges_edit)
+
+        self.remove_ranges_status_label = QLabel()
+        self.remove_ranges_status_label.setObjectName("summaryText")
+        self.remove_ranges_status_label.setWordWrap(True)
+        layout.addWidget(self.remove_ranges_status_label)
+
+        cover_row = QHBoxLayout()
+        self.cover_image_edit = QLineEdit()
+        self.cover_image_edit.setPlaceholderText("Cover image for audio files (optional)")
+        cover_row.addWidget(self.cover_image_edit, stretch=1)
+
+        self.browse_cover_image_button = QPushButton("Image")
+        self.browse_cover_image_button.setObjectName("secondaryButton")
+        self.browse_cover_image_button.clicked.connect(self._choose_cover_image)
+        cover_row.addWidget(self.browse_cover_image_button)
+        layout.addLayout(cover_row)
+
+        self._refresh_remove_ranges_status()
+        return card
+
+    def _refresh_remove_ranges_status(self) -> None:
+        text = self.remove_ranges_edit.toPlainText()
+        if not text.strip():
+            self.remove_ranges_status_label.setText("No cuts. The full recording will be used.")
+            return
+        try:
+            ranges = parse_time_ranges(text)
+        except ValueError as exc:
+            self.remove_ranges_status_label.setText(f"Fix this before running: {exc}")
+            return
+        self.remove_ranges_status_label.setText(
+            f"{len(ranges)} cut(s), {format_clock(total_duration(ranges))} removed in total."
+        )
+
+    def _choose_cover_image(self) -> None:
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose a cover image for audio files",
+            self.cover_image_edit.text() or str(Path.cwd()),
+            IMAGE_FILE_FILTER,
+        )
+        if selected_file:
+            self.cover_image_edit.setText(selected_file)
 
     def _create_output_card(self) -> QWidget:
         card = self._card()
@@ -807,9 +876,9 @@ class MainWindow(QMainWindow):
     def _choose_videos(self) -> None:
         selected_files, _ = QFileDialog.getOpenFileNames(
             self,
-            "Choose videos",
-            str(Path.cwd()),
-            VIDEO_FILE_FILTER,
+            "Choose videos or audio",
+            str(self._selected_files[-1].parent if self._selected_files else Path.home() / "Downloads"),
+            MEDIA_FILE_FILTER,
         )
         if not selected_files:
             return
@@ -876,13 +945,27 @@ class MainWindow(QMainWindow):
             return
 
         if not self._selected_files:
-            QMessageBox.warning(self, APP_NAME, "Add at least one video before starting.")
+            QMessageBox.warning(self, APP_NAME, "Add at least one video or audio file to the Media Queue (\"Add videos or audio\") before starting.")
             return
 
         output_directory_text = self.output_directory_edit.text().strip()
         if not output_directory_text:
             QMessageBox.warning(self, APP_NAME, "Choose an output directory first.")
             return
+
+        try:
+            remove_ranges = parse_time_ranges(self.remove_ranges_edit.toPlainText())
+        except ValueError as exc:
+            QMessageBox.warning(self, APP_NAME, f"Check the time ranges to remove.\n\n{exc}")
+            return
+
+        cover_image: Path | None = None
+        cover_image_text = self.cover_image_edit.text().strip()
+        if cover_image_text:
+            cover_image = Path(cover_image_text).expanduser()
+            if not cover_image.is_file():
+                QMessageBox.warning(self, APP_NAME, f"Cover image not found:\n{cover_image}")
+                return
 
         translation_service = self._build_translation_service()
         source_language = self.source_language_combo.currentData()
@@ -904,6 +987,8 @@ class MainWindow(QMainWindow):
             output_directory=Path(output_directory_text),
             max_line_length=self.max_line_length_spinbox.value(),
             subtitle_font_size=self.subtitle_font_size_spinbox.value(),
+            remove_ranges=tuple(remove_ranges),
+            cover_image=cover_image,
         )
         self._current_file_index = 0
         self._all_results = []
@@ -1812,6 +1897,9 @@ class MainWindow(QMainWindow):
             self.output_mode_combo,
             self.max_line_length_spinbox,
             self.subtitle_font_size_spinbox,
+            self.remove_ranges_edit,
+            self.cover_image_edit,
+            self.browse_cover_image_button,
             self.output_directory_edit,
             self.translation_base_url_edit,
             self.translation_model_edit,
