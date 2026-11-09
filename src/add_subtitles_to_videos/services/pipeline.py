@@ -18,6 +18,7 @@ from ..models import (
 )
 from . import OperationCancelledError, ffmpeg
 from .subtitles import (
+    clamp_segments_to_window,
     fit_srt_text_to_lines,
     parse_srt_text,
     segments_to_srt_text,
@@ -78,11 +79,12 @@ class SubtitlePipeline:
     ) -> TranscriptionResult:
         input_video = video_path.expanduser().resolve()
         stage_durations: dict[str, float] = {}
+        speech_window: tuple[float, float] | None = None
 
         if options.remove_ranges or is_audio_file(input_video):
             self._emit(progress, 0.01, "Cutting and preparing media")
             prepare_started_at = perf_counter()
-            input_video = self._prepare_media(
+            input_video, speech_window = self._prepare_media(
                 input_video,
                 options,
                 log=log,
@@ -122,6 +124,8 @@ class SubtitlePipeline:
             self._emit_log(log, f"Whisper transcription completed in {stage_durations['whisper_seconds']:.2f}s")
 
         self._ensure_not_cancelled(cancel_requested)
+        if speech_window is not None:
+            source_segments = clamp_segments_to_window(source_segments, *speech_window)
         if not source_segments:
             raise RuntimeError(
                 "Whisper returned no subtitle segments. Try a larger model or confirm the source language."
@@ -294,11 +298,12 @@ class SubtitlePipeline:
         *,
         log: LogReporter | None,
         cancel_requested: CancelChecker | None,
-    ) -> Path:
+    ) -> tuple[Path, tuple[float, float] | None]:
         """Cut the requested ranges (and add a picture to audio) into <name>.edited.mp4.
 
         The edited file is saved in the output folder and replaces the original for
-        the rest of the job, so subtitles line up with the edited timing.
+        the rest of the job, so subtitles line up with the edited timing. Also returns
+        the (start, end) seconds where speech plays when a silent intro/outro was added.
         """
         audio_only = is_audio_file(input_path)
         duration = ffmpeg.probe_duration(input_path)
@@ -360,7 +365,11 @@ class SubtitlePipeline:
             cancel_requested=cancel_requested,
         )
         self._emit_log(log, f"Saved edited media to {output_path}")
-        return output_path
+        speech_window = None
+        if intro_image is not None:
+            speech_start = ffmpeg.intro_main_offset() + ffmpeg.SPEECH_LEAD
+            speech_window = (speech_start, speech_start + total_duration(keep))
+        return output_path, speech_window
 
     @staticmethod
     def _emit(progress: ProgressReporter | None, value: float, message: str) -> None:

@@ -163,6 +163,24 @@ def split_long_segments(
     return result
 
 
+def clamp_segments_to_window(
+    segments: Iterable[SubtitleSegment], start: float, end: float
+) -> list[SubtitleSegment]:
+    """Keep subtitles inside [start, end] (e.g. off a silent logo intro/outro).
+
+    Whisper can stamp the first line from 0:00 even when the file opens with
+    silence. Segments are trimmed to the window; ones left with no time are dropped.
+    """
+    clamped: list[SubtitleSegment] = []
+    for segment in segments:
+        new_start = min(max(segment.start_seconds, start), end)
+        new_end = min(max(segment.end_seconds, start), end)
+        if new_end - new_start < 0.05:
+            continue
+        clamped.append(SubtitleSegment(start_seconds=new_start, end_seconds=new_end, text=segment.text))
+    return clamped
+
+
 def fit_srt_text_to_lines(srt_text: str, *, max_line_length: int, max_lines: int = 2) -> tuple[str, int]:
     """Return SRT text where every block fits, and how many blocks were split or rewrapped."""
     segments = parse_srt_text(srt_text, allow_empty_text=True)

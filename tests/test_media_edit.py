@@ -306,3 +306,40 @@ def test_fit_srt_text_reports_changes() -> None:
     assert changed == 1
     assert fitted.count("-->") == 3
 
+
+
+def test_clamp_segments_keeps_subtitles_off_silent_intro_and_outro() -> None:
+    from add_subtitles_to_videos.services.subtitles import clamp_segments_to_window
+
+    segments = [
+        SubtitleSegment(0.0, 5.7, "So welcome"),
+        SubtitleSegment(6.0, 8.0, "middle"),
+        SubtitleSegment(99.0, 120.0, "last"),
+        SubtitleSegment(110.0, 115.0, "in the outro"),
+    ]
+    result = clamp_segments_to_window(segments, 3.0, 100.0)
+
+    assert [(s.start_seconds, s.end_seconds, s.text) for s in result] == [
+        (3.0, 5.7, "So welcome"),
+        (6.0, 8.0, "middle"),
+        (99.0, 100.0, "last"),
+    ]
+
+
+def test_pipeline_keeps_first_subtitle_after_logo_intro(tmp_path) -> None:
+    options = _options(tmp_path, intro_image=tmp_path / "logo.png")
+    whisper = MagicMock()
+    whisper.transcribe.return_value = (
+        [SubtitleSegment(0.0, 5.7, "So welcome"), SubtitleSegment(6, 8, "b"), SubtitleSegment(8, 9, "c")],
+        TranscriptionMetadata(detected_language="el", detected_language_probability=None),
+    )
+    with patch.object(ffmpeg_module, "probe_duration", return_value=60.0), patch.object(
+        ffmpeg_module, "prepare_media"
+    ), patch.object(ffmpeg_module, "extract_audio"), patch.object(
+        ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"
+    ):
+        result = SubtitlePipeline(whisper_service=whisper).transcribe(tmp_path / "talk.m4a", options)
+
+    speech_start = ffmpeg_module.intro_main_offset() + ffmpeg_module.SPEECH_LEAD
+    assert result.source_segments[0].start_seconds == speech_start
+    assert result.review_segments[0].start_seconds == speech_start
