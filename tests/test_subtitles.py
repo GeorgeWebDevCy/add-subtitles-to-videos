@@ -298,7 +298,7 @@ class ImmediateExistingBurnThread(QThread):
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, video_path, subtitle_path, output_path, *, font_size, outline_style=False) -> None:
+    def __init__(self, video_path, subtitle_path, output_path, *, font_size, outline_style=False, max_line_length=None) -> None:
         super().__init__()
         self._video_path = video_path
         self._subtitle_path = subtitle_path
@@ -318,7 +318,7 @@ class CancellableExistingBurnThread(QThread):
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, video_path, subtitle_path, output_path, *, font_size, outline_style=False) -> None:
+    def __init__(self, video_path, subtitle_path, output_path, *, font_size, outline_style=False, max_line_length=None) -> None:
         super().__init__()
 
     def run(self) -> None:
@@ -1940,5 +1940,18 @@ def test_main_window_cut_list_status_and_bad_range_blocks_run(monkeypatch, tmp_p
         window._start_processing()
         assert warnings and "Check the time ranges" in warnings[0]
         assert window._transcription_thread is None
+    finally:
+        window.close()
+
+
+def test_ticking_wave_selects_outline_subtitles(monkeypatch) -> None:
+    _application()
+    _patch_settings(monkeypatch)
+    window = main_window_module.MainWindow()
+    try:
+        assert window._outline_subtitles_selected() is False
+        window.show_waveform_checkbox.setChecked(True)
+        assert window._outline_subtitles_selected() is True
+        assert window.subtitle_font_size_spinbox.value() == 11
     finally:
         window.close()

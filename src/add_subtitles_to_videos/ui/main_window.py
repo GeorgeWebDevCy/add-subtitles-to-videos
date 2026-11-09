@@ -216,8 +216,10 @@ class ExistingSubtitleBurnThread(QThread):
         *,
         font_size: int,
         outline_style: bool = False,
+        max_line_length: int | None = None,
     ) -> None:
         super().__init__()
+        self._max_line_length = max_line_length
         self._video_path = video_path
         self._subtitle_path = subtitle_path
         self._output_path = output_path
@@ -236,6 +238,7 @@ class ExistingSubtitleBurnThread(QThread):
                 self._output_path,
                 font_size=self._font_size,
                 outline_style=self._outline_style,
+                max_line_length=self._max_line_length,
                 cancel_requested=self.isInterruptionRequested,
             )
             self.progress_changed.emit(100, f"Wrote subtitled video to {self._output_path.name}")
@@ -601,6 +604,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(intro_row)
 
         self.show_waveform_checkbox = QCheckBox("Show a moving audio wave over the picture (audio files)")
+        self.show_waveform_checkbox.toggled.connect(self._on_show_waveform_toggled)
         layout.addWidget(self.show_waveform_checkbox)
 
         self._refresh_remove_ranges_status()
@@ -615,6 +619,12 @@ class MainWindow(QMainWindow):
         )
         if selected_file:
             self.intro_image_edit.setText(selected_file)
+
+    def _on_show_waveform_toggled(self, checked: bool) -> None:
+        # The interview look pairs the wave with small outlined subtitles; big boxed
+        # subtitles would cover the wave.
+        if checked and not self._outline_subtitles_selected():
+            self._select_combo_value(self.subtitle_style_combo, True)
 
     def _outline_subtitles_selected(self) -> bool:
         return bool(self.subtitle_style_combo.currentData())
@@ -1374,6 +1384,7 @@ class MainWindow(QMainWindow):
             output_path,
             font_size=self.subtitle_font_size_spinbox.value(),
             outline_style=self._outline_subtitles_selected(),
+            max_line_length=self.max_line_length_spinbox.value(),
         )
         thread.progress_changed.connect(self._on_progress)
         thread.log_message.connect(self._append_log)

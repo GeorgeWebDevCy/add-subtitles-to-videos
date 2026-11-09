@@ -268,3 +268,41 @@ def test_burn_subtitles_outline_style() -> None:
     style = ffmpeg_module.OUTLINE_STYLE.format(size=11)
     assert "FontSize=11" in style and "BorderStyle=1" in style
     assert "BorderStyle=3" in ffmpeg_module.BOXED_STYLE
+
+
+def test_split_long_segments_keeps_fitting_blocks_untouched() -> None:
+    from add_subtitles_to_videos.services.subtitles import split_long_segments
+
+    segment = SubtitleSegment(1.0, 3.0, "Short line\nkept as the reviewer wrote it")
+    assert split_long_segments([segment], max_line_length=42) == [segment]
+
+
+def test_split_long_segments_splits_long_block_into_timed_two_line_blocks() -> None:
+    from add_subtitles_to_videos.services.subtitles import split_long_segments
+
+    text = (
+        "Yomori, right now, even in the Kuwait, even in the Lebanon, even in here, she couldn't\n"
+        "find the perfect Yomori ingredients to make it."
+    )
+    result = split_long_segments([SubtitleSegment(1107.0, 1117.0, text)], max_line_length=42)
+
+    assert len(result) == 2
+    assert result[0].start_seconds == 1107.0 and result[-1].end_seconds == 1117.0
+    assert result[0].end_seconds == result[1].start_seconds
+    for block in result:
+        lines = block.text.splitlines()
+        assert len(lines) <= 2 and all(len(line) <= 42 for line in lines)
+    assert " ".join(" ".join(b.text.split()) for b in result) == " ".join(text.split())
+    # Cuts prefer punctuation.
+    assert result[0].text.endswith("even in here,")
+
+
+def test_fit_srt_text_reports_changes() -> None:
+    from add_subtitles_to_videos.services.subtitles import fit_srt_text_to_lines
+
+    srt = "1\n00:00:00,000 --> 00:00:02,000\nfine\n\n2\n00:00:02,000 --> 00:00:09,000\n" + "word " * 30 + "\n"
+    fitted, changed = fit_srt_text_to_lines(srt, max_line_length=42)
+
+    assert changed == 1
+    assert fitted.count("-->") == 3
+

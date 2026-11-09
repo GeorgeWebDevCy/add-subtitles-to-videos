@@ -18,6 +18,7 @@ from ..models import (
 )
 from . import OperationCancelledError, ffmpeg
 from .subtitles import (
+    fit_srt_text_to_lines,
     parse_srt_text,
     segments_to_srt_text,
     translation_segments_to_srt_text,
@@ -220,6 +221,13 @@ class SubtitlePipeline:
             raise RuntimeError(validation_error)
 
         write_started_at = perf_counter()
+        srt_text, fitted_count = fit_srt_text_to_lines(srt_text, max_line_length=options.max_line_length)
+        if fitted_count:
+            self._emit_log(
+                log,
+                f"Split or rewrapped {fitted_count} subtitle block(s) so each shows at most 2 lines "
+                f"of {options.max_line_length} characters",
+            )
         translated_segments = parse_srt_text(srt_text, allow_empty_text=True)
         video_path = transcription.input_video
         output_directory = options.output_directory.expanduser().resolve()
@@ -250,6 +258,7 @@ class SubtitlePipeline:
                 burned_video,
                 font_size=options.subtitle_font_size,
                 outline_style=options.outline_subtitles,
+                max_line_length=options.max_line_length,
                 cancel_requested=cancel_requested,
             )
             stage_durations["subtitle_burn_seconds"] = perf_counter() - burn_started_at

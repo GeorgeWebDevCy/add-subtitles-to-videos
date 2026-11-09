@@ -13,6 +13,7 @@ from time import sleep
 import imageio_ffmpeg
 
 from . import OperationCancelledError
+from .subtitles import fit_srt_text_to_lines
 
 CancelChecker = Callable[[], bool]
 
@@ -336,15 +337,24 @@ def burn_subtitles(
     *,
     font_size: int,
     outline_style: bool = False,
+    max_line_length: int | None = None,
     cancel_requested: CancelChecker | None = None,
 ) -> None:
+    """Burn an SRT into a video. With max_line_length, blocks too long for two lines are
+    split first, so long text never stacks up on screen."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     style = (OUTLINE_STYLE if outline_style else BOXED_STYLE).format(size=font_size)
 
     with TemporaryDirectory(prefix="subtitle-foundry-burn-") as temp_dir:
         temp_path = Path(temp_dir)
         local_subtitle_path = temp_path / "captions.srt"
-        shutil.copy2(subtitle_path, local_subtitle_path)
+        if max_line_length is None:
+            shutil.copy2(subtitle_path, local_subtitle_path)
+        else:
+            fitted_text, _changed = fit_srt_text_to_lines(
+                subtitle_path.read_text(encoding="utf-8-sig"), max_line_length=max_line_length
+            )
+            local_subtitle_path.write_text(fitted_text, encoding="utf-8")
         filter_expression = f"subtitles={local_subtitle_path.name}:force_style='{style}'"
         _run_ffmpeg(
             [

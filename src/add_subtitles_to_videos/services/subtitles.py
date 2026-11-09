@@ -35,10 +35,142 @@ def wrap_subtitle_text(text: str, max_line_length: int) -> str:
     if len(wrapped_lines) <= 2:
         return "\n".join(wrapped_lines)
 
+    # Keep the review editor compact; split_long_segments() breaks over-long
+    # blocks into separate timed blocks on export.
     midpoint = max(1, len(wrapped_lines) // 2)
     first_line = " ".join(wrapped_lines[:midpoint])
     second_line = " ".join(wrapped_lines[midpoint:])
     return "\n".join((first_line, second_line))
+
+
+_BREAK_AFTER = (".", "?", "!", ",", ";", ":")
+
+
+def _wrapped_lines(words: list[str], max_line_length: int) -> list[str]:
+    return wrap(" ".join(words), width=max_line_length, break_long_words=False, break_on_hyphens=False)
+
+
+def _fits(words: list[str], max_line_length: int, max_lines: int) -> bool:
+    return len(_wrapped_lines(words, max_line_length)) <= max_lines
+
+
+def _balanced_lines(words: list[str], max_line_length: int, max_lines: int) -> list[str]:
+    """Wrap into lines; for two lines pick the break that evens out the line lengths
+    (slightly preferring a break after punctuation) so no word is left dangling."""
+    greedy = _wrapped_lines(words, max_line_length)
+    if len(greedy) != 2 or max_lines < 2:
+        return greedy
+    best: tuple[float, list[str]] | None = None
+    for index in range(1, len(words)):
+        first, second = " ".join(words[:index]), " ".join(words[index:])
+        if len(first) > max_line_length or len(second) > max_line_length:
+            continue
+        score = max(len(first), len(second)) - (4 if words[index - 1].endswith(_BREAK_AFTER) else 0)
+        if best is None or score < best[0]:
+            best = (score, [first, second])
+    return best[1] if best else greedy
+
+
+def _balanced_chunks(words: list[str], max_line_length: int, max_lines: int) -> list[list[str]]:
+    """Split words into the fewest similar-length chunks that each fit on max_lines lines,
+    preferring to cut after punctuation."""
+    greedy: list[list[str]] = []
+    current: list[str] = []
+    for word in words:
+        if current and not _fits(current + [word], max_line_length, max_lines):
+            greedy.append(current)
+            current = []
+        current.append(word)
+    if current:
+        greedy.append(current)
+
+    cumulative: list[int] = []
+    total = 0
+    for word in words:
+        total += len(word) + 1
+        cumulative.append(total)
+
+    for count in range(len(greedy), len(words) + 1):
+        chunk_size = total / count
+        cuts: list[int] = []
+        previous = -1
+        for part in range(1, count):
+            target = total * part / count
+            candidates = range(previous + 1, len(words) - (count - part))
+            if not candidates:
+                break
+            window = [
+                index
+                for index in candidates
+                if words[index].endswith(_BREAK_AFTER) and abs(cumulative[index] - target) <= chunk_size * 0.25
+            ]
+            pool = window or list(candidates)
+            cut = min(pool, key=lambda index: abs(cumulative[index] - target))
+            cuts.append(cut)
+            previous = cut
+        if len(cuts) != count - 1:
+            continue
+        bounds = [0, *(cut + 1 for cut in cuts), len(words)]
+        chunks = [words[bounds[i] : bounds[i + 1]] for i in range(count)]
+        if all(chunk and _fits(chunk, max_line_length, max_lines) for chunk in chunks):
+            return chunks
+    return greedy
+
+
+def split_long_segments(
+    segments: Iterable[SubtitleSegment],
+    *,
+    max_line_length: int,
+    max_lines: int = 2,
+) -> list[SubtitleSegment]:
+    """Make every block fit on max_lines lines of max_line_length characters.
+
+    Blocks that already fit keep their text and line breaks exactly. Longer blocks
+    are split into consecutive blocks, sharing the original time by text length.
+    """
+    result: list[SubtitleSegment] = []
+    for segment in segments:
+        lines = segment.text.splitlines()
+        if not segment.text.strip() or (
+            len(lines) <= max_lines and all(len(line) <= max_line_length for line in lines)
+        ):
+            result.append(segment)
+            continue
+
+        words = segment.text.split()
+        if _fits(words, max_line_length, max_lines):
+            chunks = [words]
+        else:
+            chunks = _balanced_chunks(words, max_line_length, max_lines)
+
+        weights = [len(" ".join(chunk)) + 1 for chunk in chunks]
+        duration = max(segment.end_seconds - segment.start_seconds, 0.0)
+        start = segment.start_seconds
+        for index, (chunk, weight) in enumerate(zip(chunks, weights)):
+            end = (
+                segment.end_seconds
+                if index == len(chunks) - 1
+                else round(start + duration * weight / sum(weights), 3)
+            )
+            result.append(
+                SubtitleSegment(
+                    start_seconds=start,
+                    end_seconds=end,
+                    text="\n".join(_balanced_lines(chunk, max_line_length, max_lines)),
+                )
+            )
+            start = end
+    return result
+
+
+def fit_srt_text_to_lines(srt_text: str, *, max_line_length: int, max_lines: int = 2) -> tuple[str, int]:
+    """Return SRT text where every block fits, and how many blocks were split or rewrapped."""
+    segments = parse_srt_text(srt_text, allow_empty_text=True)
+    fitted = split_long_segments(segments, max_line_length=max_line_length, max_lines=max_lines)
+    changed = sum(1 for segment in segments if segment not in fitted)
+    if not changed:
+        return srt_text, 0
+    return segments_to_plain_srt_text(fitted, include_empty_text=True), changed
 
 
 def segments_to_srt_text(
