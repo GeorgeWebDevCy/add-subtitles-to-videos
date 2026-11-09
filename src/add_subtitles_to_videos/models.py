@@ -29,6 +29,12 @@ class ProcessingOptions:
     remove_ranges: tuple[tuple[float, float], ...] = ()
     # Picture used when an audio-only file is turned into a video.
     cover_image: Path | None = None
+    # Logo shown before and after the interview (audio files only).
+    intro_image: Path | None = None
+    # Moving waveform over the picture (audio files only).
+    show_waveform: bool = False
+    # Burned subtitles: white text with black outline instead of a dark box.
+    outline_subtitles: bool = False
 
 
 @dataclass(slots=True)

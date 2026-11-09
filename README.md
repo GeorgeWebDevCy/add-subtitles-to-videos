@@ -27,6 +27,18 @@ The **Cut & Cover** card prepares media before transcription:
   are turned into a 1920×1080 video using the **cover image** (fitted with black
   bars), or a black picture if no image is chosen.
 
+- **Portrait photos** get a portrait video of the same shape (e.g. a 3:4 photo
+  becomes 1080×1440); landscape photos use 1920×1080.
+- **Intro/outro logo** (optional, audio files): the logo is shown on white,
+  blurs away into the photo before the interview, and returns at the end. The
+  intro and outro are silent.
+- **Show a moving audio wave** (optional, audio files): a dark dotted waveform
+  that moves with the voice, in the lower middle of the picture.
+- **Burned subtitle style → White with black outline (interview)**: white text
+  with a black outline and shadow instead of the dark box (size 11 suits it).
+
+These options are ignored for video files, so other jobs are unchanged.
+
 The edited file is saved in the output folder as `<name>.edited.mp4`, and the
 rest of the job (Whisper, translation, review, burn) runs on it, so subtitle
 times match the edited version. For an audio interview with a photo and a cut

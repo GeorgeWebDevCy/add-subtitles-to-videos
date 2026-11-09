@@ -298,7 +298,7 @@ class ImmediateExistingBurnThread(QThread):
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, video_path, subtitle_path, output_path, *, font_size) -> None:
+    def __init__(self, video_path, subtitle_path, output_path, *, font_size, outline_style=False) -> None:
         super().__init__()
         self._video_path = video_path
         self._subtitle_path = subtitle_path
@@ -318,7 +318,7 @@ class CancellableExistingBurnThread(QThread):
     cancelled = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, video_path, subtitle_path, output_path, *, font_size) -> None:
+    def __init__(self, video_path, subtitle_path, output_path, *, font_size, outline_style=False) -> None:
         super().__init__()
 
     def run(self) -> None:

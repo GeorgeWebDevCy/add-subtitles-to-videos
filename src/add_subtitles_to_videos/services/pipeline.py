@@ -249,6 +249,7 @@ class SubtitlePipeline:
                 subtitle_file,
                 burned_video,
                 font_size=options.subtitle_font_size,
+                outline_style=options.outline_subtitles,
                 cancel_requested=cancel_requested,
             )
             stage_durations["subtitle_burn_seconds"] = perf_counter() - burn_started_at
@@ -309,14 +310,34 @@ class SubtitlePipeline:
                 f"({format_clock(removed)} removed)",
             )
         cover_image = options.cover_image
+        intro_image = options.intro_image
+        show_waveform = options.show_waveform
+        canvas = ffmpeg.LANDSCAPE_CANVAS
         if audio_only:
             if cover_image is not None:
-                self._emit_log(log, f"Using {cover_image.name} as the video picture")
+                canvas = ffmpeg.canvas_for_picture(ffmpeg.probe_image_size(cover_image))
+                self._emit_log(log, f"Using {cover_image.name} as the video picture ({canvas[0]}x{canvas[1]})")
             else:
                 self._emit_log(log, "No cover image chosen; the video picture will be black")
-        elif cover_image is not None:
-            self._emit_log(log, "Cover image ignored because this file already has video")
+            if intro_image is not None:
+                self._emit_log(log, f"Adding {intro_image.name} as intro and outro")
+            if show_waveform:
+                self._emit_log(log, "Adding a moving audio wave")
+        else:
+            ignored = [
+                name
+                for name, value in (
+                    ("cover image", cover_image),
+                    ("intro/outro logo", intro_image),
+                    ("audio wave", show_waveform or None),
+                )
+                if value is not None
+            ]
+            if ignored:
+                self._emit_log(log, f"Ignoring {', '.join(ignored)} because this file already has video")
             cover_image = None
+            intro_image = None
+            show_waveform = False
 
         ffmpeg.prepare_media(
             input_path,
@@ -324,6 +345,9 @@ class SubtitlePipeline:
             keep=keep,
             audio_only=audio_only,
             cover_image=cover_image,
+            canvas=canvas,
+            intro_image=intro_image,
+            show_waveform=show_waveform,
             cancel_requested=cancel_requested,
         )
         self._emit_log(log, f"Saved edited media to {output_path}")

@@ -10,6 +10,7 @@ APP_TAGLINE = "Transcribe local video, translate subtitles, and review everythin
 DEFAULT_OUTPUT_DIRECTORY = Path.cwd() / "exports"
 DEFAULT_MAX_LINE_LENGTH = 42
 DEFAULT_SUBTITLE_FONT_SIZE = 18
+OUTLINE_SUBTITLE_FONT_SIZE = 11
 DEFAULT_WHISPER_MODEL = "large-v3"
 DEFAULT_OUTPUT_MODE = OutputMode.SRT_ONLY
 DEFAULT_SOURCE_LANGUAGE = "auto"

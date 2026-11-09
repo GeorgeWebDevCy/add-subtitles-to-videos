@@ -127,7 +127,7 @@ def test_prepare_command_for_audio_uses_cover_image_and_edited_length() -> None:
         "-loop", "1", "-framerate", "25", "-i", "photo.jpg"
     ]
     graph = command[command.index("-filter_complex") + 1]
-    assert "[0:a:0][1:a:0]concat=n=2:v=0:a=1[a]" in graph
+    assert "[0:a:0][1:a:0]concat=n=2:v=0:a=1[speech]" in graph
     assert "[2:v]scale=1920:1080" in graph
     assert command[command.index("-t", command.index("-filter_complex")) + 1] == "57.000"
 
@@ -156,6 +156,8 @@ def test_pipeline_cuts_media_first_and_subtitles_the_edited_file(tmp_path) -> No
     logs: list[str] = []
 
     with patch.object(ffmpeg_module, "probe_duration", return_value=300.0), patch.object(
+        ffmpeg_module, "probe_image_size", return_value=(1200, 1600)
+    ), patch.object(
         ffmpeg_module, "prepare_media"
     ) as prepare, patch.object(ffmpeg_module, "extract_audio") as extract, patch.object(
         ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"
@@ -167,6 +169,7 @@ def test_pipeline_cuts_media_first_and_subtitles_the_edited_file(tmp_path) -> No
     assert prepare.call_args.kwargs["keep"] == [(0, 10), (13, 93), (146, 300.0)]
     assert prepare.call_args.kwargs["audio_only"] is True
     assert prepare.call_args.kwargs["cover_image"] == tmp_path / "photo.jpg"
+    assert prepare.call_args.kwargs["canvas"] == (1080, 1440)
     assert extract.call_args.args[0] == edited
     assert result.input_video == edited
     assert "media_prepare_seconds" in result.metadata.stage_durations
@@ -192,3 +195,76 @@ def test_pipeline_reports_cut_past_end_with_file_name(tmp_path) -> None:
     ):
         with pytest.raises(RuntimeError, match="clip.mov: Cut 06:40-06:50 starts after the end"):
             SubtitlePipeline(whisper_service=_fake_whisper()).transcribe(tmp_path / "clip.mov", options)
+
+
+@pytest.mark.parametrize(
+    ("size", "canvas"),
+    [(None, (1920, 1080)), ((4000, 3000), (1920, 1080)), ((1200, 1600), (1080, 1440)), ((1080, 2400), (1080, 1920))],
+)
+def test_canvas_matches_portrait_pictures(size, canvas) -> None:
+    assert ffmpeg_module.canvas_for_picture(size) == canvas
+
+
+def _branded_command(**overrides) -> list[str]:
+    kwargs = dict(
+        keep=[(0, 10), (13, 60)],
+        audio_only=True,
+        cover_image=Path("photo.jpg"),
+        canvas=(1080, 1440),
+        intro_image=Path("logo.png"),
+        show_waveform=True,
+    )
+    kwargs.update(overrides)
+    with patch.object(ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"):
+        return ffmpeg_module.build_prepare_command(Path("in.m4a"), Path("out.mp4"), **kwargs)
+
+
+def test_branded_command_adds_logo_intro_outro_and_silent_padding() -> None:
+    command = _branded_command()
+    graph = command[command.index("-filter_complex") + 1]
+
+    assert command[command.index("logo.png") - 5 : command.index("logo.png") + 1][0] == "-loop"
+    assert graph.count("xfade=") == 4
+    # Speech starts after the intro plus the short lead-in, so the intro is silent.
+    delay_ms = round((ffmpeg_module.intro_main_offset() + ffmpeg_module.SPEECH_LEAD) * 1000)
+    assert f"adelay=delays={delay_ms}:all=1" in graph
+    total = 57 + ffmpeg_module.SPEECH_LEAD + ffmpeg_module.SPEECH_TAIL + ffmpeg_module.intro_outro_extra_seconds()
+    assert command[command.index("-t", command.index("-filter_complex")) + 1] == f"{total:.3f}"
+    assert "[2:v]scale=1080:1440" in graph
+
+
+def test_branded_command_overlays_waveform_on_picture() -> None:
+    graph = _branded_command()[_branded_command().index("-filter_complex") + 1]
+
+    assert "asplit[speech][wave_audio]" in graph
+    assert "showwaves=" in graph
+    assert "[picture][wave]overlay" in graph
+
+
+def test_plain_audio_command_has_no_intro_or_wave() -> None:
+    command = _branded_command(intro_image=None, show_waveform=False)
+    graph = command[command.index("-filter_complex") + 1]
+
+    assert "xfade" not in graph and "showwaves" not in graph
+    assert "-tune" in command
+
+
+def test_pipeline_ignores_branding_for_video_input(tmp_path) -> None:
+    options = _options(
+        tmp_path, remove_ranges=((1, 2),), intro_image=tmp_path / "logo.png", show_waveform=True
+    )
+    with patch.object(ffmpeg_module, "probe_duration", return_value=30.0), patch.object(
+        ffmpeg_module, "prepare_media"
+    ) as prepare, patch.object(ffmpeg_module, "extract_audio"), patch.object(
+        ffmpeg_module, "ffmpeg_binary", return_value="ffmpeg"
+    ):
+        SubtitlePipeline(whisper_service=_fake_whisper()).transcribe(tmp_path / "clip.mov", options)
+
+    assert prepare.call_args.kwargs["intro_image"] is None
+    assert prepare.call_args.kwargs["show_waveform"] is False
+
+
+def test_burn_subtitles_outline_style() -> None:
+    style = ffmpeg_module.OUTLINE_STYLE.format(size=11)
+    assert "FontSize=11" in style and "BorderStyle=1" in style
+    assert "BorderStyle=3" in ffmpeg_module.BOXED_STYLE

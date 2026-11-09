@@ -9,6 +9,7 @@ from time import monotonic
 from PySide6.QtCore import QSettings, QSignalBlocker, QStandardPaths, QThread, QTimer, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut, QTextCursor
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -47,6 +48,7 @@ from ..config import (
     DEFAULT_WHISPER_MODEL,
     IMAGE_FILE_FILTER,
     MEDIA_FILE_FILTER,
+    OUTLINE_SUBTITLE_FONT_SIZE,
     OUTPUT_MODE_OPTIONS,
     SOURCE_LANGUAGE_OPTIONS,
     TARGET_LANGUAGE_OPTIONS,
@@ -213,12 +215,14 @@ class ExistingSubtitleBurnThread(QThread):
         output_path: Path,
         *,
         font_size: int,
+        outline_style: bool = False,
     ) -> None:
         super().__init__()
         self._video_path = video_path
         self._subtitle_path = subtitle_path
         self._output_path = output_path
         self._font_size = font_size
+        self._outline_style = outline_style
 
     def run(self) -> None:
         try:
@@ -231,6 +235,7 @@ class ExistingSubtitleBurnThread(QThread):
                 self._subtitle_path,
                 self._output_path,
                 font_size=self._font_size,
+                outline_style=self._outline_style,
                 cancel_requested=self.isInterruptionRequested,
             )
             self.progress_changed.emit(100, f"Wrote subtitled video to {self._output_path.name}")
@@ -470,8 +475,13 @@ class MainWindow(QMainWindow):
         self.max_line_length_spinbox.setValue(DEFAULT_MAX_LINE_LENGTH)
 
         self.subtitle_font_size_spinbox = QSpinBox()
-        self.subtitle_font_size_spinbox.setRange(14, 28)
+        self.subtitle_font_size_spinbox.setRange(6, 28)
         self.subtitle_font_size_spinbox.setValue(DEFAULT_SUBTITLE_FONT_SIZE)
+
+        self.subtitle_style_combo = QComboBox()
+        self.subtitle_style_combo.addItem("Dark box (default)", False)
+        self.subtitle_style_combo.addItem("White with black outline (interview)", True)
+        self.subtitle_style_combo.currentIndexChanged.connect(self._on_subtitle_style_changed)
 
         form.addRow("Source language", self.source_language_combo)
         form.addRow("Target language", self.target_language_combo)
@@ -479,6 +489,7 @@ class MainWindow(QMainWindow):
         form.addRow("Whisper model", self.whisper_model_combo)
         form.addRow("Output mode", self.output_mode_combo)
         form.addRow("Max line length", self.max_line_length_spinbox)
+        form.addRow("Burned subtitle style", self.subtitle_style_combo)
         form.addRow("Burned subtitle size", self.subtitle_font_size_spinbox)
         layout.addLayout(form)
 
@@ -578,8 +589,44 @@ class MainWindow(QMainWindow):
         cover_row.addWidget(self.browse_cover_image_button)
         layout.addLayout(cover_row)
 
+        intro_row = QHBoxLayout()
+        self.intro_image_edit = QLineEdit()
+        self.intro_image_edit.setPlaceholderText("Intro/outro logo for audio files (optional)")
+        intro_row.addWidget(self.intro_image_edit, stretch=1)
+
+        self.browse_intro_image_button = QPushButton("Logo")
+        self.browse_intro_image_button.setObjectName("secondaryButton")
+        self.browse_intro_image_button.clicked.connect(self._choose_intro_image)
+        intro_row.addWidget(self.browse_intro_image_button)
+        layout.addLayout(intro_row)
+
+        self.show_waveform_checkbox = QCheckBox("Show a moving audio wave over the picture (audio files)")
+        layout.addWidget(self.show_waveform_checkbox)
+
         self._refresh_remove_ranges_status()
         return card
+
+    def _choose_intro_image(self) -> None:
+        selected_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Choose a logo for the intro and outro",
+            self.intro_image_edit.text() or str(Path.home() / "Downloads"),
+            IMAGE_FILE_FILTER,
+        )
+        if selected_file:
+            self.intro_image_edit.setText(selected_file)
+
+    def _outline_subtitles_selected(self) -> bool:
+        return bool(self.subtitle_style_combo.currentData())
+
+    def _on_subtitle_style_changed(self, _index: int | None = None) -> None:
+        # The outline style is meant to be smaller; switch to its usual size if the
+        # size is still on the other style's default.
+        size = self.subtitle_font_size_spinbox.value()
+        if self._outline_subtitles_selected() and size == DEFAULT_SUBTITLE_FONT_SIZE:
+            self.subtitle_font_size_spinbox.setValue(OUTLINE_SUBTITLE_FONT_SIZE)
+        elif not self._outline_subtitles_selected() and size == OUTLINE_SUBTITLE_FONT_SIZE:
+            self.subtitle_font_size_spinbox.setValue(DEFAULT_SUBTITLE_FONT_SIZE)
 
     def _refresh_remove_ranges_status(self) -> None:
         text = self.remove_ranges_edit.toPlainText()
@@ -967,6 +1014,14 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, APP_NAME, f"Cover image not found:\n{cover_image}")
                 return
 
+        intro_image: Path | None = None
+        intro_image_text = self.intro_image_edit.text().strip()
+        if intro_image_text:
+            intro_image = Path(intro_image_text).expanduser()
+            if not intro_image.is_file():
+                QMessageBox.warning(self, APP_NAME, f"Intro/outro logo not found:\n{intro_image}")
+                return
+
         translation_service = self._build_translation_service()
         source_language = self.source_language_combo.currentData()
         if (
@@ -989,6 +1044,9 @@ class MainWindow(QMainWindow):
             subtitle_font_size=self.subtitle_font_size_spinbox.value(),
             remove_ranges=tuple(remove_ranges),
             cover_image=cover_image,
+            intro_image=intro_image,
+            show_waveform=self.show_waveform_checkbox.isChecked(),
+            outline_subtitles=self._outline_subtitles_selected(),
         )
         self._current_file_index = 0
         self._all_results = []
@@ -1315,6 +1373,7 @@ class MainWindow(QMainWindow):
             subtitle_path,
             output_path,
             font_size=self.subtitle_font_size_spinbox.value(),
+            outline_style=self._outline_subtitles_selected(),
         )
         thread.progress_changed.connect(self._on_progress)
         thread.log_message.connect(self._append_log)
@@ -1900,6 +1959,10 @@ class MainWindow(QMainWindow):
             self.remove_ranges_edit,
             self.cover_image_edit,
             self.browse_cover_image_button,
+            self.intro_image_edit,
+            self.browse_intro_image_button,
+            self.show_waveform_checkbox,
+            self.subtitle_style_combo,
             self.output_directory_edit,
             self.translation_base_url_edit,
             self.translation_model_edit,
